@@ -36,6 +36,7 @@ import java.util.concurrent.Callable
         InvDeleteCommand::class,
         InvResumeCommand::class,
         InvConfigCommand::class,
+        InvUrlsCommand::class,
     ],
 )
 class InvCommand : Callable<Int> {
@@ -427,6 +428,140 @@ class InvConfigCommand : Callable<Int> {
     }
 }
 
+/**
+ * Generate Google Flights URLs for an investigation.
+ */
+@Command(
+    name = "urls",
+    description = ["Generate Google Flights search URLs for price checking"],
+)
+class InvUrlsCommand : Callable<Int> {
+    @ParentCommand
+    lateinit var parent: InvCommand
+
+    @Parameters(index = "0", description = ["Investigation slug"])
+    lateinit var slug: String
+
+    @Option(names = ["--dates"], description = ["Specific date pairs: YYYY-MM-DD:YYYY-MM-DD,..."])
+    var dates: String? = null
+
+    @Option(names = ["--sample"], description = ["Generate N sample date combinations"])
+    var sample: Int? = null
+
+    override fun call(): Int {
+        parent.parent.ensureDb()
+
+        val inv = InvestigationQueries.getBySlug(slug)
+        if (inv == null) {
+            Output.error("Investigation '$slug' not found")
+            return 1
+        }
+
+        val urls = mutableListOf<Pair<String, String>>()
+
+        if (dates != null) {
+            // Parse specific dates
+            dates!!.split(",").forEach { pair ->
+                val parts = pair.split(":")
+                if (parts.size == 2) {
+                    val url = buildGoogleFlightsUrl(inv, parts[0], parts[1])
+                    urls.add(pair to url)
+                }
+            }
+        } else {
+            // Generate date combinations from investigation range
+            val departStart = java.time.LocalDate.parse(inv.departStart)
+            val departEnd = java.time.LocalDate.parse(inv.departEnd)
+            val returnStart = inv.returnStart?.let { java.time.LocalDate.parse(it) }
+            val returnEnd = inv.returnEnd?.let { java.time.LocalDate.parse(it) }
+
+            // Build all valid date combinations
+            val allCombos = mutableListOf<Pair<java.time.LocalDate, java.time.LocalDate?>>()
+
+            var depart = departStart
+            while (!depart.isAfter(departEnd)) {
+                if (returnStart != null && returnEnd != null) {
+                    // Round trip - all valid return dates
+                    var ret = maxOf(returnStart, depart.plusDays(inv.minTripDays?.toLong() ?: 1))
+                    val maxRet =
+                        if (inv.maxTripDays != null) {
+                            minOf(returnEnd, depart.plusDays(inv.maxTripDays!!.toLong()))
+                        } else {
+                            returnEnd
+                        }
+                    while (!ret.isAfter(maxRet)) {
+                        allCombos.add(depart to ret)
+                        ret = ret.plusDays(1)
+                    }
+                } else {
+                    // One way
+                    allCombos.add(depart to null)
+                }
+                depart = depart.plusDays(1)
+            }
+
+            // Sample or use all
+            val selected =
+                if (sample != null && sample!! < allCombos.size) {
+                    allCombos.shuffled().take(sample!!)
+                } else {
+                    allCombos
+                }
+
+            selected.forEach { (dep, ret) ->
+                val dateKey = if (ret != null) "$dep:$ret" else "$dep"
+                val url = buildGoogleFlightsUrl(inv, dep.toString(), ret?.toString())
+                urls.add(dateKey to url)
+            }
+        }
+
+        // Output URLs
+        if (urls.isEmpty()) {
+            Output.warn("No date combinations generated")
+            return 0
+        }
+
+        println("# Google Flights URLs for $slug (${urls.size} searches)")
+        println()
+        urls.sortedBy { it.first }.forEach { (dates, url) ->
+            println("# $dates")
+            println(url)
+            println()
+        }
+
+        return 0
+    }
+
+    private fun buildGoogleFlightsUrl(
+        inv: InvestigationDto,
+        departDate: String,
+        returnDate: String?,
+    ): String {
+        val cabin =
+            when (inv.cabinClass.lowercase()) {
+                "economy" -> "economy"
+                "premium_economy" -> "premium+economy"
+                "business" -> "business+class"
+                "first" -> "first+class"
+                else -> inv.cabinClass
+            }
+
+        return buildString {
+            append("https://www.google.com/travel/flights")
+            append("?q=Flights+from+${inv.origin}+to+${inv.destination}")
+            append("+on+$departDate")
+            if (returnDate != null) {
+                append("+returning+$returnDate")
+            }
+            append("+$cabin")
+            if (inv.maxStops == 0) {
+                append("+nonstop")
+            }
+            append("&curr=GBP")
+        }
+    }
+}
+
 // ============================================================================
 // Flight Commands
 // ============================================================================
@@ -450,6 +585,8 @@ class InvConfigCommand : Callable<Int> {
         FlightStaleCommand::class,
         FlightRefreshCommand::class,
         FlightValidateCommand::class,
+        FlightImportCommand::class,
+        FlightMatchCommand::class,
     ],
 )
 class FlightCommand : Callable<Int> {
@@ -1241,178 +1378,17 @@ class FlightValidateCommand : Callable<Int> {
     }
 }
 
-// ============================================================================
-// Scrape Commands
-// ============================================================================
-
 /**
- * Parent command for scraping operations.
+ * Import/upsert flights from JSON.
+ * Reads JSON flight data from stdin and matches against DB to update prices.
  */
 @Command(
-    name = "scrape",
-    description = ["Scraping and price refresh operations"],
-    mixinStandardHelpOptions = true,
-    subcommands = [
-        ScrapeUrlsCommand::class,
-        ScrapeUpdateCommand::class,
-        ScrapeMatchCommand::class,
-    ],
+    name = "import",
+    description = ["Import flights from JSON (updates prices for existing, optionally adds new)"],
 )
-class ScrapeCommand : Callable<Int> {
+class FlightImportCommand : Callable<Int> {
     @ParentCommand
-    lateinit var parent: ClawfareCommand
-
-    override fun call(): Int {
-        CommandLine(this).usage(System.out)
-        return 0
-    }
-}
-
-/**
- * Generate Google Flights URLs for an investigation.
- */
-@Command(
-    name = "urls",
-    description = ["Generate Google Flights search URLs for price checking"],
-)
-class ScrapeUrlsCommand : Callable<Int> {
-    @ParentCommand
-    lateinit var parent: ScrapeCommand
-
-    @Parameters(index = "0", description = ["Investigation slug"])
-    lateinit var slug: String
-
-    @Option(names = ["--dates"], description = ["Specific date pairs: YYYY-MM-DD:YYYY-MM-DD,..."])
-    var dates: String? = null
-
-    @Option(names = ["--sample"], description = ["Generate N sample date combinations"])
-    var sample: Int? = null
-
-    override fun call(): Int {
-        parent.parent.ensureDb()
-
-        val inv = InvestigationQueries.getBySlug(slug)
-        if (inv == null) {
-            Output.error("Investigation '$slug' not found")
-            return 1
-        }
-
-        val urls = mutableListOf<Pair<String, String>>()
-
-        if (dates != null) {
-            // Parse specific dates
-            dates!!.split(",").forEach { pair ->
-                val parts = pair.split(":")
-                if (parts.size == 2) {
-                    val url = buildGoogleFlightsUrl(inv, parts[0], parts[1])
-                    urls.add(pair to url)
-                }
-            }
-        } else {
-            // Generate date combinations from investigation range
-            val departStart = java.time.LocalDate.parse(inv.departStart)
-            val departEnd = java.time.LocalDate.parse(inv.departEnd)
-            val returnStart = inv.returnStart?.let { java.time.LocalDate.parse(it) }
-            val returnEnd = inv.returnEnd?.let { java.time.LocalDate.parse(it) }
-
-            // Build all valid date combinations
-            val allCombos = mutableListOf<Pair<java.time.LocalDate, java.time.LocalDate?>>()
-
-            var depart = departStart
-            while (!depart.isAfter(departEnd)) {
-                if (returnStart != null && returnEnd != null) {
-                    // Round trip - all valid return dates
-                    var ret = maxOf(returnStart, depart.plusDays(inv.minTripDays?.toLong() ?: 1))
-                    val maxRet =
-                        if (inv.maxTripDays != null) {
-                            minOf(returnEnd, depart.plusDays(inv.maxTripDays!!.toLong()))
-                        } else {
-                            returnEnd
-                        }
-                    while (!ret.isAfter(maxRet)) {
-                        allCombos.add(depart to ret)
-                        ret = ret.plusDays(1)
-                    }
-                } else {
-                    // One way
-                    allCombos.add(depart to null)
-                }
-                depart = depart.plusDays(1)
-            }
-
-            // Sample or use all
-            val selected =
-                if (sample != null && sample!! < allCombos.size) {
-                    allCombos.shuffled().take(sample!!)
-                } else {
-                    allCombos
-                }
-
-            selected.forEach { (dep, ret) ->
-                val dateKey = if (ret != null) "$dep:$ret" else "$dep"
-                val url = buildGoogleFlightsUrl(inv, dep.toString(), ret?.toString())
-                urls.add(dateKey to url)
-            }
-        }
-
-        // Output URLs
-        if (urls.isEmpty()) {
-            Output.warn("No date combinations generated")
-            return 0
-        }
-
-        println("# Google Flights URLs for $slug (${urls.size} searches)")
-        println()
-        urls.sortedBy { it.first }.forEach { (dates, url) ->
-            println("# $dates")
-            println(url)
-            println()
-        }
-
-        return 0
-    }
-
-    private fun buildGoogleFlightsUrl(
-        inv: InvestigationDto,
-        departDate: String,
-        returnDate: String?,
-    ): String {
-        val cabin =
-            when (inv.cabinClass.lowercase()) {
-                "economy" -> "economy"
-                "premium_economy" -> "premium+economy"
-                "business" -> "business+class"
-                "first" -> "first+class"
-                else -> inv.cabinClass
-            }
-
-        return buildString {
-            append("https://www.google.com/travel/flights")
-            append("?q=Flights+from+${inv.origin}+to+${inv.destination}")
-            append("+on+$departDate")
-            if (returnDate != null) {
-                append("+returning+$returnDate")
-            }
-            append("+$cabin")
-            if (inv.maxStops == 0) {
-                append("+nonstop")
-            }
-            append("&curr=GBP")
-        }
-    }
-}
-
-/**
- * Update flight prices from scraped data.
- * Reads JSON flight data from stdin and matches against DB.
- */
-@Command(
-    name = "update",
-    description = ["Update prices from scraped flight data (reads JSON from stdin)"],
-)
-class ScrapeUpdateCommand : Callable<Int> {
-    @ParentCommand
-    lateinit var parent: ScrapeCommand
+    lateinit var parent: FlightCommand
 
     @Parameters(index = "0", description = ["Investigation slug"], defaultValue = "")
     var slug: String = ""
@@ -1473,21 +1449,21 @@ class ScrapeUpdateCommand : Callable<Int> {
             return 1
         }
 
-        // Parse scraped flights
-        val scrapedFlights =
+        // Parse flights
+        val importedFlights =
             try {
-                Json.decodeFromString<List<ScrapedFlight>>(input)
+                Json.decodeFromString<List<ImportFlight>>(input)
             } catch (e: Exception) {
                 Output.error("Failed to parse input JSON: ${e.message}")
                 return 1
             }
 
-        if (scrapedFlights.isEmpty()) {
+        if (importedFlights.isEmpty()) {
             Output.warn("No flights in input")
             return 0
         }
 
-        println("Processing ${scrapedFlights.size} scraped flights...")
+        println("Processing ${importedFlights.size} flights...")
 
         val dbFlights = FlightQueries.listByInvestigation(slug)
         var updated = 0
@@ -1495,20 +1471,20 @@ class ScrapeUpdateCommand : Callable<Int> {
         var notFound = 0
         var added = 0
 
-        scrapedFlights.forEach { scraped ->
+        importedFlights.forEach { imported ->
             // Find matching flight in DB
-            val match = findMatchingFlight(dbFlights, scraped)
+            val match = findMatchingFlight(dbFlights, imported)
 
             if (match != null) {
                 // Check if price changed
-                if (match.priceAmount != scraped.price || match.priceCurrency != scraped.currency) {
+                if (match.priceAmount != imported.price || match.priceCurrency != imported.currency) {
                     val oldPrice = Output.formatPrice(match.priceAmount, match.priceCurrency)
-                    val newPrice = Output.formatPrice(scraped.price, scraped.currency)
-                    val change = scraped.price - match.priceAmount
+                    val newPrice = Output.formatPrice(imported.price, imported.currency)
+                    val change = imported.price - match.priceAmount
                     val changeStr =
                         when {
-                            change > 0 -> "↑ +${Output.formatPrice(change, scraped.currency)}"
-                            change < 0 -> "↓ ${Output.formatPrice(change, scraped.currency)}"
+                            change > 0 -> "↑ +${Output.formatPrice(change, imported.currency)}"
+                            change < 0 -> "↓ -${Output.formatPrice(-change, imported.currency)}"
                             else -> "="
                         }
 
@@ -1516,13 +1492,13 @@ class ScrapeUpdateCommand : Callable<Int> {
                         println("[DRY RUN] ${match.id.take(8)}: $oldPrice → $newPrice ($changeStr)")
                     } else {
                         // Update price
-                        FlightQueries.updatePrice(match.id, scraped.price, scraped.currency)
+                        FlightQueries.updatePrice(match.id, imported.price, imported.currency)
                         // Record history
                         PriceHistoryQueries.create(
                             PriceHistoryDto(
                                 flightId = match.id,
-                                amount = scraped.price,
-                                currency = scraped.currency,
+                                amount = imported.price,
+                                currency = imported.currency,
                                 checkedAt = java.time.Instant.now().toString(),
                             ),
                         )
@@ -1543,7 +1519,7 @@ class ScrapeUpdateCommand : Callable<Int> {
                 // Flight not in DB
                 if (addNew) {
                     if (dryRun) {
-                        println("[DRY RUN] Would add: ${scraped.airline} ${scraped.origin}→${scraped.destination} ${Output.formatPrice(scraped.price, scraped.currency)}")
+                        println("[DRY RUN] Would add: ${imported.airline} ${imported.origin}→${imported.destination} ${Output.formatPrice(imported.price, imported.currency)}")
                     } else {
                         // TODO: Add the flight
                         println("Adding new flights not yet implemented")
@@ -1563,11 +1539,11 @@ class ScrapeUpdateCommand : Callable<Int> {
 
     /**
      * Find a matching flight in the database.
-     * Matches on: origin, destination, departure time, airline
+     * Matches on: origin, destination, departure date, airline
      */
     private fun findMatchingFlight(
         dbFlights: List<FlightDto>,
-        scraped: ScrapedFlight,
+        imported: ImportFlight,
     ): FlightDto? {
         return dbFlights.find { db ->
             val outbound = Output.parseSegment(db.outboundJson)
@@ -1576,24 +1552,25 @@ class ScrapeUpdateCommand : Callable<Int> {
             val firstLeg = outbound.legs.firstOrNull() ?: return@find false
 
             // Match on key attributes
-            db.origin == scraped.origin &&
-                db.destination == scraped.destination &&
-                firstLeg.departTime.startsWith(scraped.departDate) &&
-                (firstLeg.airlineCode == scraped.airlineCode || firstLeg.airline == scraped.airline)
+            db.origin == imported.origin &&
+                db.destination == imported.destination &&
+                firstLeg.departTime.startsWith(imported.departDate) &&
+                (imported.airlineCode.isNotBlank() && firstLeg.airlineCode == imported.airlineCode ||
+                    firstLeg.airline.equals(imported.airline, ignoreCase = true))
         }
     }
 }
 
 /**
- * Match a single scraped flight against the database.
+ * Find flights matching given attributes.
  */
 @Command(
     name = "match",
-    description = ["Find a DB flight matching scraped attributes"],
+    description = ["Find flights matching given attributes"],
 )
-class ScrapeMatchCommand : Callable<Int> {
+class FlightMatchCommand : Callable<Int> {
     @ParentCommand
-    lateinit var parent: ScrapeCommand
+    lateinit var parent: FlightCommand
 
     @Parameters(index = "0", description = ["Investigation slug"])
     lateinit var slug: String
@@ -1669,11 +1646,15 @@ class ScrapeMatchCommand : Callable<Int> {
     }
 }
 
+// ============================================================================
+// Import Data Structure
+// ============================================================================
+
 /**
- * Scraped flight data structure for price updates.
+ * Flight data structure for import/upsert operations.
  */
 @kotlinx.serialization.Serializable
-data class ScrapedFlight(
+data class ImportFlight(
     val origin: String,
     val destination: String,
     val departDate: String,
@@ -1701,7 +1682,6 @@ data class ScrapedFlight(
     subcommands = [
         InvCommand::class,
         FlightCommand::class,
-        ScrapeCommand::class,
     ],
 )
 class ClawfareCommand : Callable<Int> {
