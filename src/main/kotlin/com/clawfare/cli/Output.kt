@@ -144,10 +144,11 @@ object Output {
         val headers = listOf("ID", "Price", "Cabin", "Airline", "Route", "Layover", "Depart", "Type")
         val rows =
             flights.map { flight ->
-                val segment = parseSegment(flight.outboundJson)
-                val airline = segment?.legs?.firstOrNull()?.airlineCode ?: "?"
-                val layover = segment?.let { calcLayoverTime(it) } ?: "?"
-                val departDate = segment?.departTime?.substring(0, 10) ?: "?"
+                val outbound = parseSegment(flight.outboundJson)
+                val returnSeg = flight.returnJson?.let { parseSegment(it) }
+                val airline = outbound?.legs?.firstOrNull()?.airlineCode ?: "?"
+                val layover = formatLayovers(outbound, returnSeg)
+                val departDate = outbound?.departTime?.substring(0, 10) ?: "?"
                 listOf(
                     flight.id.take(8),
                     formatPrice(flight.priceAmount, flight.priceCurrency),
@@ -164,10 +165,36 @@ object Output {
     }
 
     /**
-     * Calculate total layover time from a segment.
+     * Format layover times for display.
+     * For round trips: "1h / 2h30m" (out / return)
+     * For one ways: "1h" or "—" if nonstop
      */
-    fun calcLayoverTime(segment: FlightSegment): String {
-        if (segment.legs.size <= 1) return "—"
+    fun formatLayovers(
+        outbound: FlightSegment?,
+        returnSeg: FlightSegment?,
+    ): String {
+        val outLayover = outbound?.let { calcLayoverMinutes(it) } ?: 0
+        val retLayover = returnSeg?.let { calcLayoverMinutes(it) } ?: 0
+
+        return if (returnSeg != null) {
+            // Round trip - show both
+            "${formatLayover(outLayover)} / ${formatLayover(retLayover)}"
+        } else {
+            // One way
+            formatLayover(outLayover)
+        }
+    }
+
+    /**
+     * Format a single layover value.
+     */
+    fun formatLayover(minutes: Int): String = if (minutes == 0) "—" else formatDuration(minutes)
+
+    /**
+     * Calculate total layover time in minutes from a segment.
+     */
+    fun calcLayoverMinutes(segment: FlightSegment): Int {
+        if (segment.legs.size <= 1) return 0
 
         var totalLayover = 0
         for (i in 0 until segment.legs.size - 1) {
@@ -177,7 +204,7 @@ object Output {
             totalLayover += layoverMinutes
         }
 
-        return formatDuration(totalLayover)
+        return totalLayover
     }
 
     /**
