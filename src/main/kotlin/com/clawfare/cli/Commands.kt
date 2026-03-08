@@ -682,7 +682,8 @@ class FlightShowCommand : Callable<Int> {
     override fun call(): Int {
         parent.parent.ensureDb()
 
-        val flight = FlightQueries.getById(id)
+        // Try exact match first, then prefix match
+        val flight = FlightQueries.getById(id) ?: FlightQueries.getByIdPrefix(id)
         if (flight == null) {
             Output.error("Flight '$id' not found")
             return 1
@@ -738,7 +739,7 @@ class FlightDeleteCommand : Callable<Int> {
     override fun call(): Int {
         parent.parent.ensureDb()
 
-        val flight = FlightQueries.getById(id)
+        val flight = FlightQueries.getById(id) ?: FlightQueries.getByIdPrefix(id)
         if (flight == null) {
             Output.error("Flight '$id' not found")
             return 1
@@ -774,7 +775,7 @@ class FlightTagCommand : Callable<Int> {
     override fun call(): Int {
         parent.parent.ensureDb()
 
-        val flight = FlightQueries.getById(id)
+        val flight = FlightQueries.getById(id) ?: FlightQueries.getByIdPrefix(id)
         if (flight == null) {
             Output.error("Flight '$id' not found")
             return 1
@@ -820,7 +821,7 @@ class FlightUntagCommand : Callable<Int> {
     override fun call(): Int {
         parent.parent.ensureDb()
 
-        val flight = FlightQueries.getById(id)
+        val flight = FlightQueries.getById(id) ?: FlightQueries.getByIdPrefix(id)
         if (flight == null) {
             Output.error("Flight '$id' not found")
             return 1
@@ -872,7 +873,7 @@ class FlightPriceCommand : Callable<Int> {
     override fun call(): Int {
         parent.parent.ensureDb()
 
-        val flight = FlightQueries.getById(id)
+        val flight = FlightQueries.getById(id) ?: FlightQueries.getByIdPrefix(id)
         if (flight == null) {
             Output.error("Flight '$id' not found")
             return 1

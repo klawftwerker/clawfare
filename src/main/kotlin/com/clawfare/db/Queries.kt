@@ -258,6 +258,23 @@ object FlightQueries {
         }
 
     /**
+     * Get flight by ID prefix.
+     * Returns the flight if exactly one matches the prefix.
+     *
+     * @return Flight or null if not found or ambiguous
+     */
+    fun getByIdPrefix(prefix: String): FlightDto? =
+        transaction {
+            val matches =
+                Flights
+                    .selectAll()
+                    .where { Flights.id like "$prefix%" }
+                    .map { it.toFlightDto() }
+
+            if (matches.size == 1) matches.first() else null
+        }
+
+    /**
      * Get flight by share link.
      *
      * @return Flight or null if not found
