@@ -141,12 +141,12 @@ object Output {
             return "No flights found."
         }
 
-        val headers = listOf("ID", "Price", "Cabin", "Airline", "Route", "Stops", "Depart", "Type")
+        val headers = listOf("ID", "Price", "Cabin", "Airline", "Route", "Layover", "Depart", "Type")
         val rows =
             flights.map { flight ->
                 val segment = parseSegment(flight.outboundJson)
                 val airline = segment?.legs?.firstOrNull()?.airlineCode ?: "?"
-                val stops = segment?.stops?.toString() ?: "?"
+                val layover = segment?.let { calcLayoverTime(it) } ?: "?"
                 val departDate = segment?.departTime?.substring(0, 10) ?: "?"
                 listOf(
                     flight.id.take(8),
@@ -154,13 +154,30 @@ object Output {
                     flight.bookingClass ?: "?",
                     airline,
                     "${flight.origin}→${flight.destination}",
-                    stops,
+                    layover,
                     departDate,
                     if (flight.tripType == "round_trip") "RT" else "OW",
                 )
             }
 
         return formatTable(headers, rows)
+    }
+
+    /**
+     * Calculate total layover time from a segment.
+     */
+    fun calcLayoverTime(segment: FlightSegment): String {
+        if (segment.legs.size <= 1) return "—"
+
+        var totalLayover = 0
+        for (i in 0 until segment.legs.size - 1) {
+            val arriveTime = java.time.OffsetDateTime.parse(segment.legs[i].arriveTime)
+            val departTime = java.time.OffsetDateTime.parse(segment.legs[i + 1].departTime)
+            val layoverMinutes = java.time.Duration.between(arriveTime, departTime).toMinutes().toInt()
+            totalLayover += layoverMinutes
+        }
+
+        return formatDuration(totalLayover)
     }
 
     /**
