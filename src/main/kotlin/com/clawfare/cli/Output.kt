@@ -139,7 +139,7 @@ object Output {
             flights.map { flight ->
                 val outbound = parseSegment(flight.outboundJson)
                 val returnSeg = flight.returnJson?.let { parseSegment(it) }
-                val airline = outbound?.legs?.firstOrNull()?.airlineCode ?: "?"
+                val airline = outbound?.legs?.firstOrNull()?.airline ?: "?"
                 val layover = formatLayovers(outbound, returnSeg)
                 val departDate = outbound?.departTime?.substring(0, 10) ?: "?"
                 val typeFlag =
@@ -260,13 +260,26 @@ object Output {
             return "No price history found."
         }
 
-        val headers = listOf("Date", "Amount", "Currency")
+        val headers = listOf("Date", "Price", "Change")
+        var prevAmount: Double? = null
         val rows =
             history.map { entry ->
+                val change =
+                    if (prevAmount != null) {
+                        val diff = entry.amount - prevAmount!!
+                        when {
+                            diff > 0 -> "↑ +${formatPrice(diff, entry.currency)}"
+                            diff < 0 -> "↓ -${formatPrice(-diff, entry.currency)}"
+                            else -> "—"
+                        }
+                    } else {
+                        "—"
+                    }
+                prevAmount = entry.amount
                 listOf(
                     entry.checkedAt.substring(0, 19).replace("T", " "),
-                    "%.2f".format(entry.amount),
-                    entry.currency,
+                    formatPrice(entry.amount, entry.currency),
+                    change,
                 )
             }
 

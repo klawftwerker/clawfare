@@ -443,6 +443,7 @@ class InvConfigCommand : Callable<Int> {
         FlightListCommand::class,
         FlightShowCommand::class,
         FlightDeleteCommand::class,
+        FlightUpdateCommand::class,
         FlightTagCommand::class,
         FlightUntagCommand::class,
         FlightPriceCommand::class,
@@ -745,7 +746,7 @@ class FlightShowCommand : Callable<Int> {
 
             if (showHistory) {
                 println("\nPrice History:")
-                val history = PriceHistoryQueries.getByFlightId(id)
+                val history = PriceHistoryQueries.getByFlightId(flight.id)
                 println(Output.formatPriceHistory(history))
             }
         }
@@ -782,6 +783,107 @@ class FlightDeleteCommand : Callable<Int> {
             return 0
         } else {
             Output.error("Failed to delete flight")
+            return 1
+        }
+    }
+}
+
+/**
+ * Update flight fields.
+ */
+@Command(
+    name = "update",
+    description = ["Update flight fields (notes, disqualified, cabin, aircraft, fare, outbound, return, link)"],
+)
+class FlightUpdateCommand : Callable<Int> {
+    @ParentCommand
+    lateinit var parent: FlightCommand
+
+    @Parameters(index = "0", description = ["Flight ID (or prefix)"])
+    lateinit var id: String
+
+    @Option(names = ["--notes"], description = ["Update notes (use empty string to clear)"])
+    var notes: String? = null
+
+    @Option(names = ["--disqualified"], description = ["Set disqualification reason (use empty string to clear)"])
+    var disqualified: String? = null
+
+    @Option(names = ["--cabin"], description = ["Update cabin class (economy, premium_economy, business, first)"])
+    var bookingClass: String? = null
+
+    @Option(names = ["--aircraft"], description = ["Update aircraft type"])
+    var aircraftType: String? = null
+
+    @Option(names = ["--fare"], description = ["Update fare brand"])
+    var fareBrand: String? = null
+
+    @Option(names = ["--outbound"], description = ["Update outbound segment JSON"])
+    var outboundJson: String? = null
+
+    @Option(names = ["--return"], description = ["Update return segment JSON"])
+    var returnJson: String? = null
+
+    @Option(names = ["--link", "-l"], description = ["Update share link"])
+    var shareLink: String? = null
+
+    @Option(names = ["--source", "-s"], description = ["Update data source"])
+    var source: String? = null
+
+    @Option(names = ["--type"], description = ["Update trip type (round_trip, one_way)"])
+    var tripType: String? = null
+
+    @Option(names = ["--structure"], description = ["Update ticket structure (single, two_one_ways)"])
+    var ticketStructure: String? = null
+
+    override fun call(): Int {
+        parent.parent.ensureDb()
+
+        val flight = FlightQueries.getById(id) ?: FlightQueries.getByIdPrefix(id)
+        if (flight == null) {
+            Output.error("Flight '$id' not found")
+            return 1
+        }
+
+        // Build updated DTO with only changed fields
+        val updated = flight.copy(
+            notes = notes ?: flight.notes,
+            disqualified = if (disqualified == "") null else (disqualified ?: flight.disqualified),
+            bookingClass = bookingClass ?: flight.bookingClass,
+            aircraftType = aircraftType ?: flight.aircraftType,
+            fareBrand = fareBrand ?: flight.fareBrand,
+            outboundJson = outboundJson ?: flight.outboundJson,
+            returnJson = if (returnJson == "") null else (returnJson ?: flight.returnJson),
+            shareLink = shareLink ?: flight.shareLink,
+            source = source ?: flight.source,
+            tripType = tripType ?: flight.tripType,
+            ticketStructure = ticketStructure ?: flight.ticketStructure,
+        )
+
+        // Check if anything actually changed
+        if (updated == flight) {
+            println("No changes specified")
+            return 0
+        }
+
+        val result = FlightQueries.update(updated)
+        if (result != null) {
+            val changes = mutableListOf<String>()
+            if (notes != null) changes.add("notes")
+            if (disqualified != null) changes.add("disqualified")
+            if (bookingClass != null) changes.add("cabin")
+            if (aircraftType != null) changes.add("aircraft")
+            if (fareBrand != null) changes.add("fare")
+            if (outboundJson != null) changes.add("outbound")
+            if (returnJson != null) changes.add("return")
+            if (shareLink != null) changes.add("link")
+            if (source != null) changes.add("source")
+            if (tripType != null) changes.add("type")
+            if (ticketStructure != null) changes.add("structure")
+
+            Output.success("Updated flight ${flight.id}: ${changes.joinToString(", ")}")
+            return 0
+        } else {
+            Output.error("Failed to update flight")
             return 1
         }
     }
@@ -916,7 +1018,7 @@ class FlightPriceCommand : Callable<Int> {
         val newPrice = Output.formatPrice(amount, newCurrency)
 
         // Update flight price
-        if (FlightQueries.updatePrice(id, amount, newCurrency) == null) {
+        if (FlightQueries.updatePrice(flight.id, amount, newCurrency) == null) {
             Output.error("Failed to update price")
             return 1
         }
@@ -924,7 +1026,7 @@ class FlightPriceCommand : Callable<Int> {
         // Record in price history
         PriceHistoryQueries.create(
             PriceHistoryDto(
-                flightId = id,
+                flightId = flight.id,
                 amount = amount,
                 currency = newCurrency,
                 checkedAt = Instant.now().toString(),
@@ -1140,6 +1242,417 @@ class FlightValidateCommand : Callable<Int> {
 }
 
 // ============================================================================
+// Scrape Commands
+// ============================================================================
+
+/**
+ * Parent command for scraping operations.
+ */
+@Command(
+    name = "scrape",
+    description = ["Scraping and price refresh operations"],
+    mixinStandardHelpOptions = true,
+    subcommands = [
+        ScrapeUrlsCommand::class,
+        ScrapeUpdateCommand::class,
+        ScrapeMatchCommand::class,
+    ],
+)
+class ScrapeCommand : Callable<Int> {
+    @ParentCommand
+    lateinit var parent: ClawfareCommand
+
+    override fun call(): Int {
+        CommandLine(this).usage(System.out)
+        return 0
+    }
+}
+
+/**
+ * Generate Google Flights URLs for an investigation.
+ */
+@Command(
+    name = "urls",
+    description = ["Generate Google Flights search URLs for price checking"],
+)
+class ScrapeUrlsCommand : Callable<Int> {
+    @ParentCommand
+    lateinit var parent: ScrapeCommand
+
+    @Parameters(index = "0", description = ["Investigation slug"])
+    lateinit var slug: String
+
+    @Option(names = ["--dates"], description = ["Specific date pairs: YYYY-MM-DD:YYYY-MM-DD,..."])
+    var dates: String? = null
+
+    @Option(names = ["--sample"], description = ["Generate N sample date combinations"])
+    var sample: Int? = null
+
+    override fun call(): Int {
+        parent.parent.ensureDb()
+
+        val inv = InvestigationQueries.getBySlug(slug)
+        if (inv == null) {
+            Output.error("Investigation '$slug' not found")
+            return 1
+        }
+
+        val urls = mutableListOf<Pair<String, String>>()
+
+        if (dates != null) {
+            // Parse specific dates
+            dates!!.split(",").forEach { pair ->
+                val parts = pair.split(":")
+                if (parts.size == 2) {
+                    val url = buildGoogleFlightsUrl(inv, parts[0], parts[1])
+                    urls.add(pair to url)
+                }
+            }
+        } else {
+            // Generate date combinations from investigation range
+            val departStart = java.time.LocalDate.parse(inv.departStart)
+            val departEnd = java.time.LocalDate.parse(inv.departEnd)
+            val returnStart = inv.returnStart?.let { java.time.LocalDate.parse(it) }
+            val returnEnd = inv.returnEnd?.let { java.time.LocalDate.parse(it) }
+
+            // Build all valid date combinations
+            val allCombos = mutableListOf<Pair<java.time.LocalDate, java.time.LocalDate?>>()
+
+            var depart = departStart
+            while (!depart.isAfter(departEnd)) {
+                if (returnStart != null && returnEnd != null) {
+                    // Round trip - all valid return dates
+                    var ret = maxOf(returnStart, depart.plusDays(inv.minTripDays?.toLong() ?: 1))
+                    val maxRet =
+                        if (inv.maxTripDays != null) {
+                            minOf(returnEnd, depart.plusDays(inv.maxTripDays!!.toLong()))
+                        } else {
+                            returnEnd
+                        }
+                    while (!ret.isAfter(maxRet)) {
+                        allCombos.add(depart to ret)
+                        ret = ret.plusDays(1)
+                    }
+                } else {
+                    // One way
+                    allCombos.add(depart to null)
+                }
+                depart = depart.plusDays(1)
+            }
+
+            // Sample or use all
+            val selected =
+                if (sample != null && sample!! < allCombos.size) {
+                    allCombos.shuffled().take(sample!!)
+                } else {
+                    allCombos
+                }
+
+            selected.forEach { (dep, ret) ->
+                val dateKey = if (ret != null) "$dep:$ret" else "$dep"
+                val url = buildGoogleFlightsUrl(inv, dep.toString(), ret?.toString())
+                urls.add(dateKey to url)
+            }
+        }
+
+        // Output URLs
+        if (urls.isEmpty()) {
+            Output.warn("No date combinations generated")
+            return 0
+        }
+
+        println("# Google Flights URLs for $slug (${urls.size} searches)")
+        println()
+        urls.sortedBy { it.first }.forEach { (dates, url) ->
+            println("# $dates")
+            println(url)
+            println()
+        }
+
+        return 0
+    }
+
+    private fun buildGoogleFlightsUrl(
+        inv: InvestigationDto,
+        departDate: String,
+        returnDate: String?,
+    ): String {
+        val cabin =
+            when (inv.cabinClass.lowercase()) {
+                "economy" -> "economy"
+                "premium_economy" -> "premium+economy"
+                "business" -> "business+class"
+                "first" -> "first+class"
+                else -> inv.cabinClass
+            }
+
+        return buildString {
+            append("https://www.google.com/travel/flights")
+            append("?q=Flights+from+${inv.origin}+to+${inv.destination}")
+            append("+on+$departDate")
+            if (returnDate != null) {
+                append("+returning+$returnDate")
+            }
+            append("+$cabin")
+            if (inv.maxStops == 0) {
+                append("+nonstop")
+            }
+            append("&curr=GBP")
+        }
+    }
+}
+
+/**
+ * Update flight prices from scraped data.
+ * Reads JSON flight data from stdin and matches against DB.
+ */
+@Command(
+    name = "update",
+    description = ["Update prices from scraped flight data (reads JSON from stdin)"],
+)
+class ScrapeUpdateCommand : Callable<Int> {
+    @ParentCommand
+    lateinit var parent: ScrapeCommand
+
+    @Parameters(index = "0", description = ["Investigation slug"])
+    lateinit var slug: String
+
+    @Option(names = ["--dry-run"], description = ["Show what would be updated without making changes"])
+    var dryRun: Boolean = false
+
+    @Option(names = ["--add-new"], description = ["Add new flights not in DB"])
+    var addNew: Boolean = false
+
+    override fun call(): Int {
+        parent.parent.ensureDb()
+
+        val inv = InvestigationQueries.getBySlug(slug)
+        if (inv == null) {
+            Output.error("Investigation '$slug' not found")
+            return 1
+        }
+
+        // Read JSON from stdin
+        val input = generateSequence(::readLine).joinToString("\n")
+        if (input.isBlank()) {
+            Output.error("No input provided. Pipe JSON flight data to stdin.")
+            return 1
+        }
+
+        // Parse scraped flights
+        val scrapedFlights =
+            try {
+                Json.decodeFromString<List<ScrapedFlight>>(input)
+            } catch (e: Exception) {
+                Output.error("Failed to parse input JSON: ${e.message}")
+                return 1
+            }
+
+        if (scrapedFlights.isEmpty()) {
+            Output.warn("No flights in input")
+            return 0
+        }
+
+        println("Processing ${scrapedFlights.size} scraped flights...")
+
+        val dbFlights = FlightQueries.listByInvestigation(slug)
+        var updated = 0
+        var unchanged = 0
+        var notFound = 0
+        var added = 0
+
+        scrapedFlights.forEach { scraped ->
+            // Find matching flight in DB
+            val match = findMatchingFlight(dbFlights, scraped)
+
+            if (match != null) {
+                // Check if price changed
+                if (match.priceAmount != scraped.price || match.priceCurrency != scraped.currency) {
+                    val oldPrice = Output.formatPrice(match.priceAmount, match.priceCurrency)
+                    val newPrice = Output.formatPrice(scraped.price, scraped.currency)
+                    val change = scraped.price - match.priceAmount
+                    val changeStr =
+                        when {
+                            change > 0 -> "↑ +${Output.formatPrice(change, scraped.currency)}"
+                            change < 0 -> "↓ ${Output.formatPrice(change, scraped.currency)}"
+                            else -> "="
+                        }
+
+                    if (dryRun) {
+                        println("[DRY RUN] ${match.id.take(8)}: $oldPrice → $newPrice ($changeStr)")
+                    } else {
+                        // Update price
+                        FlightQueries.updatePrice(match.id, scraped.price, scraped.currency)
+                        // Record history
+                        PriceHistoryQueries.create(
+                            PriceHistoryDto(
+                                flightId = match.id,
+                                amount = scraped.price,
+                                currency = scraped.currency,
+                                checkedAt = java.time.Instant.now().toString(),
+                            ),
+                        )
+                        // Clear stale flag
+                        FlightQueries.markStale(match.id, false)
+                        println("${match.id.take(8)}: $oldPrice → $newPrice ($changeStr)")
+                    }
+                    updated++
+                } else {
+                    // Same price, just update checked timestamp
+                    if (!dryRun) {
+                        FlightQueries.updatePriceCheckedAt(match.id)
+                        FlightQueries.markStale(match.id, false)
+                    }
+                    unchanged++
+                }
+            } else {
+                // Flight not in DB
+                if (addNew) {
+                    if (dryRun) {
+                        println("[DRY RUN] Would add: ${scraped.airline} ${scraped.origin}→${scraped.destination} ${Output.formatPrice(scraped.price, scraped.currency)}")
+                    } else {
+                        // TODO: Add the flight
+                        println("Adding new flights not yet implemented")
+                    }
+                    added++
+                } else {
+                    notFound++
+                }
+            }
+        }
+
+        println()
+        println("Results: $updated updated, $unchanged unchanged, $notFound not matched" + if (addNew) ", $added added" else "")
+
+        return 0
+    }
+
+    /**
+     * Find a matching flight in the database.
+     * Matches on: origin, destination, departure time, airline
+     */
+    private fun findMatchingFlight(
+        dbFlights: List<FlightDto>,
+        scraped: ScrapedFlight,
+    ): FlightDto? {
+        return dbFlights.find { db ->
+            val outbound = Output.parseSegment(db.outboundJson)
+            if (outbound == null) return@find false
+
+            val firstLeg = outbound.legs.firstOrNull() ?: return@find false
+
+            // Match on key attributes
+            db.origin == scraped.origin &&
+                db.destination == scraped.destination &&
+                firstLeg.departTime.startsWith(scraped.departDate) &&
+                (firstLeg.airlineCode == scraped.airlineCode || firstLeg.airline == scraped.airline)
+        }
+    }
+}
+
+/**
+ * Match a single scraped flight against the database.
+ */
+@Command(
+    name = "match",
+    description = ["Find a DB flight matching scraped attributes"],
+)
+class ScrapeMatchCommand : Callable<Int> {
+    @ParentCommand
+    lateinit var parent: ScrapeCommand
+
+    @Parameters(index = "0", description = ["Investigation slug"])
+    lateinit var slug: String
+
+    @Option(names = ["--origin", "-o"], required = true, description = ["Origin airport"])
+    lateinit var origin: String
+
+    @Option(names = ["--dest", "-d"], required = true, description = ["Destination airport"])
+    lateinit var dest: String
+
+    @Option(names = ["--depart"], required = true, description = ["Departure date (YYYY-MM-DD)"])
+    lateinit var departDate: String
+
+    @Option(names = ["--airline", "-a"], description = ["Airline code or name"])
+    var airline: String? = null
+
+    @Option(names = ["--time", "-t"], description = ["Departure time (HH:MM)"])
+    var departTime: String? = null
+
+    override fun call(): Int {
+        parent.parent.ensureDb()
+
+        val flights = FlightQueries.listByInvestigation(slug)
+        if (flights.isEmpty()) {
+            Output.error("No flights in '$slug'")
+            return 1
+        }
+
+        val matches =
+            flights.filter { f ->
+                val outbound = Output.parseSegment(f.outboundJson) ?: return@filter false
+                val firstLeg = outbound.legs.firstOrNull() ?: return@filter false
+
+                // Required matches
+                if (f.origin != origin.uppercase()) return@filter false
+                if (f.destination != dest.uppercase()) return@filter false
+                if (!firstLeg.departTime.startsWith(departDate)) return@filter false
+
+                // Optional filters
+                if (airline != null) {
+                    val airlineMatch =
+                        firstLeg.airlineCode.equals(airline, ignoreCase = true) ||
+                            firstLeg.airline.contains(airline!!, ignoreCase = true)
+                    if (!airlineMatch) return@filter false
+                }
+
+                if (departTime != null) {
+                    val timeMatch = firstLeg.departTime.contains("T$departTime")
+                    if (!timeMatch) return@filter false
+                }
+
+                true
+            }
+
+        if (matches.isEmpty()) {
+            println("No matches found")
+            return 1
+        }
+
+        println("Found ${matches.size} match(es):")
+        println()
+        matches.forEach { f ->
+            val outbound = Output.parseSegment(f.outboundJson)!!
+            val firstLeg = outbound.legs.first()
+            println("${f.id}")
+            println("  ${Output.formatPrice(f.priceAmount, f.priceCurrency)} - ${firstLeg.airline}")
+            println("  ${f.origin}→${f.destination} on ${firstLeg.departTime.take(16)}")
+            println("  Link: ${f.shareLink}")
+            println()
+        }
+
+        return 0
+    }
+}
+
+/**
+ * Scraped flight data structure for price updates.
+ */
+@kotlinx.serialization.Serializable
+data class ScrapedFlight(
+    val origin: String,
+    val destination: String,
+    val departDate: String,
+    val returnDate: String? = null,
+    val airline: String,
+    val airlineCode: String = "",
+    val price: Double,
+    val currency: String = "GBP",
+    val departTime: String? = null,
+    val link: String? = null,
+)
+
+// ============================================================================
 // Root Command
 // ============================================================================
 
@@ -1154,6 +1667,7 @@ class FlightValidateCommand : Callable<Int> {
     subcommands = [
         InvCommand::class,
         FlightCommand::class,
+        ScrapeCommand::class,
     ],
 )
 class ClawfareCommand : Callable<Int> {

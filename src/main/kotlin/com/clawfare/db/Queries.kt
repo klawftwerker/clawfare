@@ -423,6 +423,16 @@ object FlightQueries {
         }
 
     /**
+     * Update only the price_checked_at timestamp (for when price is unchanged).
+     */
+    fun updatePriceCheckedAt(id: String): Boolean =
+        transaction {
+            Flights.update({ Flights.id eq id }) {
+                it[priceCheckedAt] = Instant.now().toString()
+            } > 0
+        }
+
+    /**
      * Delete flight by ID.
      * Note: This will also delete associated price history.
      *
