@@ -361,9 +361,6 @@ class InvConfigCommand : Callable<Int> {
     @Option(names = ["--max-price"], description = ["Maximum price to track"])
     var maxPrice: Double? = null
 
-    @Option(names = ["--preferred-airlines"], description = ["Comma-separated preferred airline codes"])
-    var preferredAirlines: String? = null
-
     @Option(names = ["--depart-after"], description = ["Minimum departure time (HH:MM)"])
     var departAfter: String? = null
 
@@ -385,7 +382,6 @@ class InvConfigCommand : Callable<Int> {
         if (showConfig) {
             println("Investigation: $slug")
             println("  Max price: ${investigation.maxPrice ?: "not set"}")
-            println("  Preferred airlines: ${investigation.preferredAirlines ?: "any"}")
             println("  Depart after: ${investigation.departAfter ?: "any"}")
             println("  Depart before: ${investigation.departBefore ?: "any"}")
             return 0
@@ -396,7 +392,6 @@ class InvConfigCommand : Callable<Int> {
             InvestigationQueries.updateConfig(
                 slug,
                 maxPrice = maxPrice,
-                preferredAirlines = preferredAirlines,
                 departAfter = departAfter,
                 departBefore = departBefore,
             )

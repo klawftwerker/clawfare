@@ -28,7 +28,6 @@ data class InvestigationDto(
     val maxStops: Int = 1,
     // Config fields
     val maxPrice: Double? = null,
-    val preferredAirlines: String? = null,
     val departAfter: String? = null,
     val departBefore: String? = null,
     val createdAt: String = Instant.now().toString(),
@@ -98,7 +97,6 @@ object InvestigationQueries {
                 it[cabinClass] = dto.cabinClass
                 it[maxStops] = dto.maxStops
                 it[maxPrice] = dto.maxPrice
-                it[preferredAirlines] = dto.preferredAirlines
                 it[departAfter] = dto.departAfter
                 it[departBefore] = dto.departBefore
                 it[createdAt] = dto.createdAt
@@ -149,7 +147,6 @@ object InvestigationQueries {
                     it[cabinClass] = dto.cabinClass
                     it[maxStops] = dto.maxStops
                     it[maxPrice] = dto.maxPrice
-                    it[preferredAirlines] = dto.preferredAirlines
                     it[departAfter] = dto.departAfter
                     it[departBefore] = dto.departBefore
                     it[updatedAt] = Instant.now().toString()
@@ -163,7 +160,6 @@ object InvestigationQueries {
     fun updateConfig(
         slug: String,
         maxPrice: Double? = null,
-        preferredAirlines: String? = null,
         departAfter: String? = null,
         departBefore: String? = null,
     ): Boolean =
@@ -171,7 +167,6 @@ object InvestigationQueries {
             val updates =
                 Investigations.update({ Investigations.slug eq slug }) {
                     maxPrice?.let { value -> it[Investigations.maxPrice] = value }
-                    preferredAirlines?.let { value -> it[Investigations.preferredAirlines] = value }
                     departAfter?.let { value -> it[Investigations.departAfter] = value }
                     departBefore?.let { value -> it[Investigations.departBefore] = value }
                     it[updatedAt] = Instant.now().toString()
@@ -202,7 +197,6 @@ object InvestigationQueries {
             cabinClass = this[Investigations.cabinClass],
             maxStops = this[Investigations.maxStops],
             maxPrice = this[Investigations.maxPrice],
-            preferredAirlines = this[Investigations.preferredAirlines],
             departAfter = this[Investigations.departAfter],
             departBefore = this[Investigations.departBefore],
             createdAt = this[Investigations.createdAt],
