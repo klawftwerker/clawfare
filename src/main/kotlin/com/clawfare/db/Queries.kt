@@ -26,6 +26,11 @@ data class InvestigationDto(
     val returnEnd: String? = null,
     val cabinClass: String = "economy",
     val maxStops: Int = 1,
+    // Config fields
+    val maxPrice: Double? = null,
+    val preferredAirlines: String? = null,
+    val departAfter: String? = null,
+    val departBefore: String? = null,
     val createdAt: String = Instant.now().toString(),
     val updatedAt: String = Instant.now().toString(),
 )
@@ -92,6 +97,10 @@ object InvestigationQueries {
                 it[returnEnd] = dto.returnEnd
                 it[cabinClass] = dto.cabinClass
                 it[maxStops] = dto.maxStops
+                it[maxPrice] = dto.maxPrice
+                it[preferredAirlines] = dto.preferredAirlines
+                it[departAfter] = dto.departAfter
+                it[departBefore] = dto.departBefore
                 it[createdAt] = dto.createdAt
                 it[updatedAt] = dto.updatedAt
             }
@@ -139,9 +148,35 @@ object InvestigationQueries {
                     it[returnEnd] = dto.returnEnd
                     it[cabinClass] = dto.cabinClass
                     it[maxStops] = dto.maxStops
+                    it[maxPrice] = dto.maxPrice
+                    it[preferredAirlines] = dto.preferredAirlines
+                    it[departAfter] = dto.departAfter
+                    it[departBefore] = dto.departBefore
                     it[updatedAt] = Instant.now().toString()
                 }
             if (updated > 0) getBySlug(dto.slug) else null
+        }
+
+    /**
+     * Update investigation config fields only.
+     */
+    fun updateConfig(
+        slug: String,
+        maxPrice: Double? = null,
+        preferredAirlines: String? = null,
+        departAfter: String? = null,
+        departBefore: String? = null,
+    ): Boolean =
+        transaction {
+            val updates =
+                Investigations.update({ Investigations.slug eq slug }) {
+                    maxPrice?.let { value -> it[Investigations.maxPrice] = value }
+                    preferredAirlines?.let { value -> it[Investigations.preferredAirlines] = value }
+                    departAfter?.let { value -> it[Investigations.departAfter] = value }
+                    departBefore?.let { value -> it[Investigations.departBefore] = value }
+                    it[updatedAt] = Instant.now().toString()
+                }
+            updates > 0
         }
 
     /**
@@ -166,6 +201,10 @@ object InvestigationQueries {
             returnEnd = this[Investigations.returnEnd],
             cabinClass = this[Investigations.cabinClass],
             maxStops = this[Investigations.maxStops],
+            maxPrice = this[Investigations.maxPrice],
+            preferredAirlines = this[Investigations.preferredAirlines],
+            departAfter = this[Investigations.departAfter],
+            departBefore = this[Investigations.departBefore],
             createdAt = this[Investigations.createdAt],
             updatedAt = this[Investigations.updatedAt],
         )

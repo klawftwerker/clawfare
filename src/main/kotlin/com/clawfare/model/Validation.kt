@@ -428,6 +428,11 @@ object FlightValidator {
     }
 
     /**
+     * Check if an airline code is allowed.
+     */
+    fun isAirlineAllowed(code: String): Boolean = code in allowedAirlines
+
+    /**
      * Validate a single airline code.
      */
     fun validateAirlineCode(

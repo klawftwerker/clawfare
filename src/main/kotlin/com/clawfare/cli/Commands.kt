@@ -32,6 +32,8 @@ import java.util.concurrent.Callable
         InvListCommand::class,
         InvShowCommand::class,
         InvDeleteCommand::class,
+        InvResumeCommand::class,
+        InvConfigCommand::class,
     ],
 )
 class InvCommand : Callable<Int> {
@@ -255,6 +257,160 @@ class InvDeleteCommand : Callable<Int> {
     }
 }
 
+/**
+ * Resume an investigation - output context for continuing work.
+ */
+@Command(
+    name = "resume",
+    description = ["Output investigation context for resuming work"],
+)
+class InvResumeCommand : Callable<Int> {
+    @ParentCommand
+    lateinit var parent: InvCommand
+
+    @Parameters(index = "0", description = ["Investigation slug"])
+    lateinit var slug: String
+
+    @Option(names = ["--json"], description = ["Output as JSON"])
+    var jsonOutput: Boolean = false
+
+    override fun call(): Int {
+        parent.parent.ensureDb()
+
+        val investigation = InvestigationQueries.getBySlug(slug)
+        if (investigation == null) {
+            Output.error("Investigation '$slug' not found")
+            return 1
+        }
+
+        val flights = FlightQueries.listByInvestigation(slug)
+        val priceHistory = flights.flatMap { f -> PriceHistoryQueries.getByFlightId(f.id) }
+
+        if (jsonOutput) {
+            val context =
+                mapOf(
+                    "investigation" to investigation,
+                    "flights" to flights,
+                    "price_history" to priceHistory,
+                )
+            println(Output.toJson(context))
+        } else {
+            println("=== RESUME: $slug ===")
+            println()
+            println("--- Investigation ---")
+            println(Output.formatInvestigation(investigation, detailed = true))
+            println()
+            println("--- Flights (${flights.size}) ---")
+            if (flights.isEmpty()) {
+                println("No flights recorded yet.")
+            } else {
+                // Group by cabin class
+                val byClass = flights.groupBy { it.bookingClass ?: "unknown" }
+                byClass.forEach { (cabin, list) ->
+                    println("\n$cabin:")
+                    list.sortedBy { it.priceAmount }.forEach { f ->
+                        val price = Output.formatPrice(f.priceAmount, f.priceCurrency)
+                        val route = "${f.origin}→${f.destination}"
+                        val stops = Output.parseStops(f.outboundJson)
+                        println("  $price | $route | ${stops}stop | ${f.source} | ${f.id}")
+                    }
+                }
+
+                // Price range
+                val minPrice = flights.minOfOrNull { it.priceAmount }
+                val maxPrice = flights.maxOfOrNull { it.priceAmount }
+                val currency = flights.firstOrNull()?.priceCurrency ?: "GBP"
+                println()
+                println("Price range: ${Output.formatPrice(minPrice ?: 0.0, currency)} - ${Output.formatPrice(maxPrice ?: 0.0, currency)}")
+            }
+
+            // Flights needing refresh (checked > 24h ago)
+            val staleFlights =
+                flights.filter { f ->
+                    val checkedAt = java.time.Instant.parse(f.priceCheckedAt)
+                    val dayAgo = java.time.Instant.now().minusSeconds(86400)
+                    checkedAt.isBefore(dayAgo)
+                }
+            if (staleFlights.isNotEmpty()) {
+                println()
+                println("--- Needs Price Refresh (${staleFlights.size}) ---")
+                staleFlights.forEach { f ->
+                    println("  ${f.id}: ${f.shareLink}")
+                }
+            }
+        }
+
+        return 0
+    }
+}
+
+/**
+ * Update investigation config.
+ */
+@Command(
+    name = "config",
+    description = ["Update investigation configuration"],
+)
+class InvConfigCommand : Callable<Int> {
+    @ParentCommand
+    lateinit var parent: InvCommand
+
+    @Parameters(index = "0", description = ["Investigation slug"])
+    lateinit var slug: String
+
+    @Option(names = ["--max-price"], description = ["Maximum price to track"])
+    var maxPrice: Double? = null
+
+    @Option(names = ["--preferred-airlines"], description = ["Comma-separated preferred airline codes"])
+    var preferredAirlines: String? = null
+
+    @Option(names = ["--depart-after"], description = ["Minimum departure time (HH:MM)"])
+    var departAfter: String? = null
+
+    @Option(names = ["--depart-before"], description = ["Maximum departure time (HH:MM)"])
+    var departBefore: String? = null
+
+    @Option(names = ["--show"], description = ["Show current config"])
+    var showConfig: Boolean = false
+
+    override fun call(): Int {
+        parent.parent.ensureDb()
+
+        val investigation = InvestigationQueries.getBySlug(slug)
+        if (investigation == null) {
+            Output.error("Investigation '$slug' not found")
+            return 1
+        }
+
+        if (showConfig) {
+            println("Investigation: $slug")
+            println("  Max price: ${investigation.maxPrice ?: "not set"}")
+            println("  Preferred airlines: ${investigation.preferredAirlines ?: "any"}")
+            println("  Depart after: ${investigation.departAfter ?: "any"}")
+            println("  Depart before: ${investigation.departBefore ?: "any"}")
+            return 0
+        }
+
+        // Update config
+        val updated =
+            InvestigationQueries.updateConfig(
+                slug,
+                maxPrice = maxPrice,
+                preferredAirlines = preferredAirlines,
+                departAfter = departAfter,
+                departBefore = departBefore,
+            )
+
+        if (updated) {
+            Output.success("Updated config for '$slug'")
+            return 0
+        } else {
+            Output.error("No changes made")
+            return 1
+        }
+    }
+}
+
 // ============================================================================
 // Flight Commands
 // ============================================================================
@@ -273,6 +429,8 @@ class InvDeleteCommand : Callable<Int> {
         FlightTagCommand::class,
         FlightUntagCommand::class,
         FlightPriceCommand::class,
+        FlightRefreshCommand::class,
+        FlightValidateCommand::class,
     ],
 )
 class FlightCommand : Callable<Int> {
@@ -331,6 +489,9 @@ class FlightAddCommand : Callable<Int> {
 
     @Option(names = ["--tags"], description = ["Comma-separated tags"])
     var tags: String? = null
+
+    @Option(names = ["--cabin"], description = ["Cabin class (economy, premium_economy, business, first)"])
+    var bookingClass: String? = null
 
     override fun call(): Int {
         parent.parent.ensureDb()
@@ -393,6 +554,7 @@ class FlightAddCommand : Callable<Int> {
                 destination = outbound.arriveAirport,
                 outboundJson = outboundJson,
                 returnJson = returnJson,
+                bookingClass = bookingClass,
                 notes = notes,
                 tags = tagsJson,
                 capturedAt = now,
@@ -748,6 +910,158 @@ class FlightPriceCommand : Callable<Int> {
 
         Output.success("Updated price: $oldPrice → $newPrice ($changeStr)")
         return 0
+    }
+}
+
+/**
+ * List flights needing price refresh.
+ */
+@Command(
+    name = "refresh",
+    description = ["List flights needing price refresh"],
+)
+class FlightRefreshCommand : Callable<Int> {
+    @ParentCommand
+    lateinit var parent: FlightCommand
+
+    @Parameters(index = "0", description = ["Investigation slug"])
+    lateinit var slug: String
+
+    @Option(names = ["--hours"], description = ["Consider stale after N hours"], defaultValue = "24")
+    var staleHours: Int = 24
+
+    @Option(names = ["--links"], description = ["Output only share links (for scripting)"])
+    var linksOnly: Boolean = false
+
+    override fun call(): Int {
+        parent.parent.ensureDb()
+
+        val flights = FlightQueries.listByInvestigation(slug)
+        if (flights.isEmpty()) {
+            if (!linksOnly) Output.warn("No flights in '$slug'")
+            return 0
+        }
+
+        val cutoff = java.time.Instant.now().minusSeconds(staleHours.toLong() * 3600)
+        val stale =
+            flights.filter { f ->
+                val checkedAt = java.time.Instant.parse(f.priceCheckedAt)
+                checkedAt.isBefore(cutoff)
+            }
+
+        if (linksOnly) {
+            stale.forEach { println(it.shareLink) }
+        } else {
+            if (stale.isEmpty()) {
+                println("All ${flights.size} flights checked within ${staleHours}h")
+            } else {
+                println("Flights needing refresh (${stale.size}/${flights.size}):")
+                println()
+                stale.forEach { f ->
+                    val age = java.time.Duration.between(
+                        java.time.Instant.parse(f.priceCheckedAt),
+                        java.time.Instant.now(),
+                    ).toHours()
+                    println("${f.id} | ${age}h ago | ${f.shareLink}")
+                }
+            }
+        }
+
+        return 0
+    }
+}
+
+/**
+ * Validate flights in an investigation.
+ */
+@Command(
+    name = "validate",
+    description = ["Validate flights in an investigation"],
+)
+class FlightValidateCommand : Callable<Int> {
+    @ParentCommand
+    lateinit var parent: FlightCommand
+
+    @Parameters(index = "0", description = ["Investigation slug"])
+    lateinit var slug: String
+
+    @Option(names = ["--fix"], description = ["Attempt to fix issues"])
+    var fix: Boolean = false
+
+    override fun call(): Int {
+        parent.parent.ensureDb()
+
+        val flights = FlightQueries.listByInvestigation(slug)
+        if (flights.isEmpty()) {
+            println("No flights to validate")
+            return 0
+        }
+
+        var errors = 0
+        var warnings = 0
+
+        flights.forEach { f ->
+            // Check required fields
+            if (f.shareLink.isBlank()) {
+                Output.error("[${f.id}] Missing share link")
+                errors++
+            }
+
+            // Check segment JSON is valid
+            try {
+                Json.decodeFromString<FlightSegment>(f.outboundJson)
+            } catch (e: Exception) {
+                Output.error("[${f.id}] Invalid outbound JSON: ${e.message}")
+                errors++
+            }
+
+            if (f.returnJson != null) {
+                try {
+                    Json.decodeFromString<FlightSegment>(f.returnJson!!)
+                } catch (e: Exception) {
+                    Output.error("[${f.id}] Invalid return JSON: ${e.message}")
+                    errors++
+                }
+            }
+
+            // Validate against rules
+            val outbound = try { Json.decodeFromString<FlightSegment>(f.outboundJson) } catch (e: Exception) { null }
+            val returnSeg = f.returnJson?.let { try { Json.decodeFromString<FlightSegment>(it) } catch (e: Exception) { null } }
+
+            if (outbound != null) {
+                // Check airline allowlist
+                outbound.legs.forEach { leg ->
+                    if (!FlightValidator.isAirlineAllowed(leg.airlineCode)) {
+                        Output.warn("[${f.id}] Blocked airline: ${leg.airlineCode} ${leg.airline}")
+                        warnings++
+                    }
+                }
+            }
+
+            if (returnSeg != null) {
+                returnSeg.legs.forEach { leg ->
+                    if (!FlightValidator.isAirlineAllowed(leg.airlineCode)) {
+                        Output.warn("[${f.id}] Blocked airline: ${leg.airlineCode} ${leg.airline}")
+                        warnings++
+                    }
+                }
+            }
+
+            // Check round trip has return
+            if (f.tripType == "round_trip" && f.returnJson == null) {
+                Output.error("[${f.id}] Round trip missing return segment")
+                errors++
+            }
+        }
+
+        println()
+        if (errors == 0 && warnings == 0) {
+            Output.success("All ${flights.size} flights valid")
+        } else {
+            println("Checked ${flights.size} flights: $errors errors, $warnings warnings")
+        }
+
+        return if (errors > 0) 1 else 0
     }
 }
 

@@ -16,6 +16,11 @@ object Investigations : Table("investigations") {
     val returnEnd = text("return_end").nullable()
     val cabinClass = text("cabin_class").default("economy")
     val maxStops = integer("max_stops").default(1)
+    // Config fields
+    val maxPrice = double("max_price").nullable()
+    val preferredAirlines = text("preferred_airlines").nullable()
+    val departAfter = text("depart_after").nullable()
+    val departBefore = text("depart_before").nullable()
     val createdAt = text("created_at")
     val updatedAt = text("updated_at")
 

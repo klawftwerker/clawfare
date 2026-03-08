@@ -231,6 +231,17 @@ object Output {
         }
 
     /**
+     * Parse stops from outbound JSON.
+     */
+    fun parseStops(outboundJson: String): Int =
+        try {
+            val segment = compactJson.decodeFromString<FlightSegment>(outboundJson)
+            segment.stops
+        } catch (_: Exception) {
+            -1
+        }
+
+    /**
      * Encode tags to JSON string.
      */
     fun encodeTags(tags: List<String>): String = compactJson.encodeToString(tags)
