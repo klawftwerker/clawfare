@@ -2,6 +2,8 @@ package com.clawfare.importer
 
 import com.clawfare.db.FlightDto
 import com.clawfare.db.FlightQueries
+import com.clawfare.db.PriceHistoryDto
+import com.clawfare.db.PriceHistoryQueries
 import com.clawfare.model.FlightEntry
 import com.clawfare.model.FlightSegment
 import com.clawfare.model.FlightValidator
@@ -166,6 +168,18 @@ object JsonImporter {
 
         return try {
             FlightQueries.create(dto)
+            
+            // Also create initial price history entry
+            PriceHistoryQueries.create(
+                PriceHistoryDto(
+                    flightId = dto.id,
+                    amount = entry.priceAmount,
+                    currency = entry.priceCurrency,
+                    checkedAt = entry.priceCheckedAt,
+                    priceMarket = entry.priceMarket,
+                )
+            )
+            
             ImportResult.Success(
                 id = dto.id,
                 flightEntry = entry,
@@ -181,6 +195,7 @@ object JsonImporter {
 
     /**
      * Convert a FlightEntry to a FlightDto for database storage.
+     * Note: Price fields are stored in PriceHistoryDto, not FlightDto.
      */
     fun entryToDto(
         entry: FlightEntry,
@@ -201,9 +216,6 @@ object JsonImporter {
                     TripType.ONE_WAY -> "one_way"
                 },
             ticketStructure = entry.ticketStructure.name.lowercase(),
-            priceAmount = entry.priceAmount,
-            priceCurrency = entry.priceCurrency,
-            priceMarket = entry.priceMarket,
             origin = entry.origin,
             destination = entry.destination,
             outboundJson = outboundJson,
@@ -213,7 +225,6 @@ object JsonImporter {
             notes = entry.notes,
             tags = tagsJson,
             capturedAt = entry.capturedAt,
-            priceCheckedAt = entry.priceCheckedAt,
         )
     }
 }

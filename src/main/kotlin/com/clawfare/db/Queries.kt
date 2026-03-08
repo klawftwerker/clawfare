@@ -50,24 +50,50 @@ data class FlightDto(
     val source: String,
     val tripType: String,
     val ticketStructure: String,
-    val priceAmount: Double,
-    val priceCurrency: String,
-    val priceMarket: String,
     val origin: String,
     val destination: String,
     val outboundJson: String,
     val returnJson: String? = null,
     val bookingClass: String? = null,
     val cabinMixed: Boolean = false,
-    val stale: Boolean = false,
     val aircraftType: String? = null,
     val fareBrand: String? = null,
     val disqualified: String? = null,
     val notes: String? = null,
     val tags: String? = null,
     val capturedAt: String = Instant.now().toString(),
-    val priceCheckedAt: String = Instant.now().toString(),
 )
+
+/**
+ * Flight with its latest price - convenience view for CLI commands.
+ */
+data class FlightWithPrice(
+    val flight: FlightDto,
+    val priceAmount: Double,
+    val priceCurrency: String,
+    val priceMarket: String,
+    val priceCheckedAt: String,
+    val priceSource: String,
+) {
+    val id: String get() = flight.id
+    val investigationSlug: String get() = flight.investigationSlug
+    val shareLink: String get() = flight.shareLink
+    val source: String get() = flight.source
+    val tripType: String get() = flight.tripType
+    val ticketStructure: String get() = flight.ticketStructure
+    val origin: String get() = flight.origin
+    val destination: String get() = flight.destination
+    val outboundJson: String get() = flight.outboundJson
+    val returnJson: String? get() = flight.returnJson
+    val bookingClass: String? get() = flight.bookingClass
+    val cabinMixed: Boolean get() = flight.cabinMixed
+    val aircraftType: String? get() = flight.aircraftType
+    val fareBrand: String? get() = flight.fareBrand
+    val disqualified: String? get() = flight.disqualified
+    val notes: String? get() = flight.notes
+    val tags: String? get() = flight.tags
+    val capturedAt: String get() = flight.capturedAt
+}
 
 /**
  * Price history entry data class.
@@ -78,6 +104,8 @@ data class PriceHistoryDto(
     val amount: Double,
     val currency: String,
     val checkedAt: String = Instant.now().toString(),
+    val source: String = "kraftwerker",
+    val priceMarket: String = "UK",
 )
 
 // ============================================================================
@@ -256,23 +284,18 @@ object FlightQueries {
                 it[flightSource] = dto.source
                 it[tripType] = dto.tripType
                 it[ticketStructure] = dto.ticketStructure
-                it[priceAmount] = dto.priceAmount
-                it[priceCurrency] = dto.priceCurrency
-                it[priceMarket] = dto.priceMarket
                 it[origin] = dto.origin
                 it[destination] = dto.destination
                 it[outboundJson] = dto.outboundJson
                 it[returnJson] = dto.returnJson
                 it[bookingClass] = dto.bookingClass
                 it[cabinMixed] = if (dto.cabinMixed) 1 else 0
-                it[stale] = if (dto.stale) 1 else 0
                 it[aircraftType] = dto.aircraftType
                 it[fareBrand] = dto.fareBrand
                 it[disqualified] = dto.disqualified
                 it[notes] = dto.notes
                 it[tags] = dto.tags
                 it[capturedAt] = dto.capturedAt
-                it[priceCheckedAt] = dto.priceCheckedAt
             }
             dto
         }
@@ -344,7 +367,7 @@ object FlightQueries {
         }
 
     /**
-     * Update an existing flight.
+     * Update an existing flight (metadata only, not prices).
      *
      * @return Updated flight or null if not found
      */
@@ -357,79 +380,19 @@ object FlightQueries {
                     it[flightSource] = dto.source
                     it[tripType] = dto.tripType
                     it[ticketStructure] = dto.ticketStructure
-                    it[priceAmount] = dto.priceAmount
-                    it[priceCurrency] = dto.priceCurrency
-                    it[priceMarket] = dto.priceMarket
                     it[origin] = dto.origin
                     it[destination] = dto.destination
                     it[outboundJson] = dto.outboundJson
                     it[returnJson] = dto.returnJson
                     it[bookingClass] = dto.bookingClass
                     it[cabinMixed] = if (dto.cabinMixed) 1 else 0
-                    it[stale] = if (dto.stale) 1 else 0
                     it[aircraftType] = dto.aircraftType
                     it[fareBrand] = dto.fareBrand
                     it[disqualified] = dto.disqualified
                     it[notes] = dto.notes
                     it[tags] = dto.tags
-                    it[priceCheckedAt] = Instant.now().toString()
                 }
             if (updated > 0) getById(dto.id) else null
-        }
-
-    /**
-     * Update just the price of a flight.
-     *
-     * @return Updated flight or null if not found
-     */
-    fun updatePrice(
-        id: String,
-        amount: Double,
-        currency: String,
-    ): FlightDto? =
-        transaction {
-            val updated =
-                Flights.update({ Flights.id eq id }) {
-                    it[priceAmount] = amount
-                    it[priceCurrency] = currency
-                    it[priceCheckedAt] = Instant.now().toString()
-                    it[stale] = 0 // Clear stale flag when price is updated
-                }
-            if (updated > 0) getById(id) else null
-        }
-
-    /**
-     * Mark a flight as stale (needs price refresh).
-     */
-    fun markStale(
-        id: String,
-        isStale: Boolean = true,
-    ): Boolean =
-        transaction {
-            Flights.update({ Flights.id eq id }) {
-                it[stale] = if (isStale) 1 else 0
-            } > 0
-        }
-
-    /**
-     * Get all stale flights for an investigation.
-     */
-    fun listStale(investigationSlug: String): List<FlightDto> =
-        transaction {
-            Flights
-                .selectAll()
-                .where { (Flights.investigationSlug eq investigationSlug) and (Flights.stale eq 1) }
-                .map { it.toFlightDto() }
-        }
-
-    /**
-     * Update only the price_checked_at timestamp (for when price is unchanged).
-     */
-    fun updatePriceCheckedAt(id: String): Boolean =
-        transaction {
-            Flights.update({ Flights.id eq id }) {
-                it[priceCheckedAt] = Instant.now().toString()
-            } > 0
         }
 
     /**
@@ -477,24 +440,71 @@ object FlightQueries {
             source = this[Flights.flightSource],
             tripType = this[Flights.tripType],
             ticketStructure = this[Flights.ticketStructure],
-            priceAmount = this[Flights.priceAmount],
-            priceCurrency = this[Flights.priceCurrency],
-            priceMarket = this[Flights.priceMarket],
             origin = this[Flights.origin],
             destination = this[Flights.destination],
             outboundJson = this[Flights.outboundJson],
             returnJson = this[Flights.returnJson],
             bookingClass = this[Flights.bookingClass],
             cabinMixed = this[Flights.cabinMixed] == 1,
-            stale = this[Flights.stale] == 1,
             aircraftType = this[Flights.aircraftType],
             fareBrand = this[Flights.fareBrand],
             disqualified = this[Flights.disqualified],
             notes = this[Flights.notes],
             tags = this[Flights.tags],
             capturedAt = this[Flights.capturedAt],
-            priceCheckedAt = this[Flights.priceCheckedAt],
         )
+
+    /**
+     * Get a flight with its latest price.
+     */
+    fun getWithPrice(id: String): FlightWithPrice? {
+        val flight = getById(id) ?: return null
+        val latestPrice = PriceHistoryQueries.getLatest(id) ?: return null
+        return FlightWithPrice(
+            flight = flight,
+            priceAmount = latestPrice.amount,
+            priceCurrency = latestPrice.currency,
+            priceMarket = latestPrice.priceMarket,
+            priceCheckedAt = latestPrice.checkedAt,
+            priceSource = latestPrice.source,
+        )
+    }
+
+    /**
+     * Get a flight with its latest price by ID prefix.
+     */
+    fun getWithPriceByPrefix(prefix: String): FlightWithPrice? {
+        val flight = getByIdPrefix(prefix) ?: return null
+        val latestPrice = PriceHistoryQueries.getLatest(flight.id) ?: return null
+        return FlightWithPrice(
+            flight = flight,
+            priceAmount = latestPrice.amount,
+            priceCurrency = latestPrice.currency,
+            priceMarket = latestPrice.priceMarket,
+            priceCheckedAt = latestPrice.checkedAt,
+            priceSource = latestPrice.source,
+        )
+    }
+
+    /**
+     * List all flights for an investigation with their latest prices.
+     */
+    fun listWithPrices(investigationSlug: String): List<FlightWithPrice> {
+        val flights = listByInvestigation(investigationSlug)
+        return flights.mapNotNull { flight ->
+            val latestPrice = PriceHistoryQueries.getLatest(flight.id)
+            if (latestPrice != null) {
+                FlightWithPrice(
+                    flight = flight,
+                    priceAmount = latestPrice.amount,
+                    priceCurrency = latestPrice.currency,
+                    priceMarket = latestPrice.priceMarket,
+                    priceCheckedAt = latestPrice.checkedAt,
+                    priceSource = latestPrice.source,
+                )
+            } else null
+        }
+    }
 }
 
 // ============================================================================
@@ -518,6 +528,8 @@ object PriceHistoryQueries {
                     it[amount] = dto.amount
                     it[currency] = dto.currency
                     it[checkedAt] = dto.checkedAt
+                    it[priceSource] = dto.source
+                    it[priceMarket] = dto.priceMarket
                 } get PriceHistory.id
 
             dto.copy(id = insertedId)
@@ -550,6 +562,18 @@ object PriceHistoryQueries {
         }
 
     /**
+     * Get all price history for an investigation (via flight join).
+     */
+    fun getByInvestigation(investigationSlug: String): List<PriceHistoryDto> =
+        transaction {
+            (PriceHistory innerJoin Flights)
+                .selectAll()
+                .where { Flights.investigationSlug eq investigationSlug }
+                .orderBy(PriceHistory.checkedAt)
+                .map { it.toPriceHistoryDto() }
+        }
+
+    /**
      * Delete all price history for a flight.
      *
      * @return Number of entries deleted
@@ -566,5 +590,7 @@ object PriceHistoryQueries {
             amount = this[PriceHistory.amount],
             currency = this[PriceHistory.currency],
             checkedAt = this[PriceHistory.checkedAt],
+            source = this[PriceHistory.priceSource],
+            priceMarket = this[PriceHistory.priceMarket],
         )
 }

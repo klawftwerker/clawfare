@@ -33,7 +33,8 @@ object Investigations : Table("investigations") {
 
 /**
  * Exposed table definition for flights.
- * A flight is a specific itinerary with pricing captured during an investigation.
+ * A flight is a specific itinerary captured during an investigation.
+ * Prices are stored in price_history, not on the flight record.
  */
 object Flights : Table("flights") {
     val id = text("id")
@@ -43,10 +44,6 @@ object Flights : Table("flights") {
     val tripType = text("trip_type")
     val ticketStructure = text("ticket_structure")
 
-    val priceAmount = double("price_amount")
-    val priceCurrency = text("price_currency")
-    val priceMarket = text("price_market")
-
     val origin = text("origin")
     val destination = text("destination")
 
@@ -55,7 +52,6 @@ object Flights : Table("flights") {
 
     val bookingClass = text("booking_class").nullable()
     val cabinMixed = integer("cabin_mixed").default(0)
-    val stale = integer("stale").default(0)
     val aircraftType = text("aircraft_type").nullable()
     val fareBrand = text("fare_brand").nullable()
     val disqualified = text("disqualified").nullable()
@@ -63,14 +59,14 @@ object Flights : Table("flights") {
     val tags = text("tags").nullable()
 
     val capturedAt = text("captured_at")
-    val priceCheckedAt = text("price_checked_at")
 
     override val primaryKey = PrimaryKey(id)
 }
 
 /**
  * Exposed table definition for price history.
- * Tracks price changes for a flight over time.
+ * Tracks all price observations for a flight over time.
+ * Each observation has a source (which agent/system recorded it).
  */
 object PriceHistory : Table("price_history") {
     val id = integer("id").autoIncrement()
@@ -78,6 +74,8 @@ object PriceHistory : Table("price_history") {
     val amount = double("amount")
     val currency = text("currency")
     val checkedAt = text("checked_at")
+    val priceSource = text("source").default("kraftwerker")
+    val priceMarket = text("price_market").default("UK")
 
     override val primaryKey = PrimaryKey(id)
 }

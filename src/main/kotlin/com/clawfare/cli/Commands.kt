@@ -3,6 +3,7 @@ package com.clawfare.cli
 import com.clawfare.db.ClawfareDatabase
 import com.clawfare.db.FlightDto
 import com.clawfare.db.FlightQueries
+import com.clawfare.db.FlightWithPrice
 import com.clawfare.db.InvestigationDto
 import com.clawfare.db.InvestigationQueries
 import com.clawfare.db.PriceHistoryDto
@@ -286,6 +287,7 @@ class InvResumeCommand : Callable<Int> {
             return 1
         }
 
+        val flightsWithPrices = FlightQueries.listWithPrices(slug)
         val flights = FlightQueries.listByInvestigation(slug)
         val priceHistory = flights.flatMap { f -> PriceHistoryQueries.getByFlightId(f.id) }
 
@@ -303,12 +305,12 @@ class InvResumeCommand : Callable<Int> {
             println("--- Investigation ---")
             println(Output.formatInvestigation(investigation, detailed = true))
             println()
-            println("--- Flights (${flights.size}) ---")
-            if (flights.isEmpty()) {
+            println("--- Flights (${flightsWithPrices.size}) ---")
+            if (flightsWithPrices.isEmpty()) {
                 println("No flights recorded yet.")
             } else {
                 // Group by cabin class
-                val byClass = flights.groupBy { it.bookingClass ?: "unknown" }
+                val byClass = flightsWithPrices.groupBy { it.bookingClass ?: "unknown" }
                 byClass.forEach { (cabin, list) ->
                     println("\n$cabin:")
                     list.sortedBy { it.priceAmount }.forEach { f ->
@@ -320,16 +322,16 @@ class InvResumeCommand : Callable<Int> {
                 }
 
                 // Price range
-                val minPrice = flights.minOfOrNull { it.priceAmount }
-                val maxPrice = flights.maxOfOrNull { it.priceAmount }
-                val currency = flights.firstOrNull()?.priceCurrency ?: "GBP"
+                val minPrice = flightsWithPrices.minOfOrNull { it.priceAmount }
+                val maxPrice = flightsWithPrices.maxOfOrNull { it.priceAmount }
+                val currency = flightsWithPrices.firstOrNull()?.priceCurrency ?: "GBP"
                 println()
                 println("Price range: ${Output.formatPrice(minPrice ?: 0.0, currency)} - ${Output.formatPrice(maxPrice ?: 0.0, currency)}")
             }
 
             // Flights needing refresh (checked > 24h ago)
             val staleFlights =
-                flights.filter { f ->
+                flightsWithPrices.filter { f ->
                     val checkedAt = java.time.Instant.parse(f.priceCheckedAt)
                     val dayAgo = java.time.Instant.now().minusSeconds(86400)
                     checkedAt.isBefore(dayAgo)
@@ -583,6 +585,7 @@ class InvUrlsCommand : Callable<Int> {
         FlightUntagCommand::class,
         FlightPriceCommand::class,
         FlightStaleCommand::class,
+        FlightHistoryCommand::class,
         FlightRefreshCommand::class,
         FlightValidateCommand::class,
         FlightImportCommand::class,
@@ -715,9 +718,6 @@ class FlightAddCommand : Callable<Int> {
                 source = source,
                 tripType = tripType,
                 ticketStructure = ticketStructure,
-                priceAmount = priceAmount,
-                priceCurrency = priceCurrency.uppercase(),
-                priceMarket = priceMarket.uppercase(),
                 origin = outbound.departAirport,
                 destination = outbound.arriveAirport,
                 outboundJson = outboundJson,
@@ -729,7 +729,6 @@ class FlightAddCommand : Callable<Int> {
                 notes = notes,
                 tags = tagsJson,
                 capturedAt = now,
-                priceCheckedAt = now,
             )
 
         try {
@@ -742,6 +741,7 @@ class FlightAddCommand : Callable<Int> {
                     amount = priceAmount,
                     currency = priceCurrency.uppercase(),
                     checkedAt = now,
+                    priceMarket = priceMarket.uppercase(),
                 ),
             )
 
@@ -794,7 +794,7 @@ class FlightListCommand : Callable<Int> {
             return 1
         }
 
-        var flights = FlightQueries.listByInvestigation(investigationSlug)
+        var flights = FlightQueries.listWithPrices(investigationSlug)
 
         // Apply filters
         if (tagFilter != null) {
@@ -825,7 +825,7 @@ class FlightListCommand : Callable<Int> {
         if (jsonOutput) {
             println(Output.toJson(flights))
         } else {
-            println(Output.formatFlightTable(flights))
+            println(Output.formatFlightWithPriceTable(flights))
         }
 
         return 0
@@ -1147,33 +1147,28 @@ class FlightPriceCommand : Callable<Int> {
     override fun call(): Int {
         parent.parent.ensureDb()
 
-        val flight = FlightQueries.getById(id) ?: FlightQueries.getByIdPrefix(id)
-        if (flight == null) {
-            Output.error("Flight '$id' not found")
+        val flightWithPrice = FlightQueries.getWithPrice(id) ?: FlightQueries.getWithPriceByPrefix(id)
+        if (flightWithPrice == null) {
+            Output.error("Flight '$id' not found (or no price history)")
             return 1
         }
 
-        val newCurrency = (currency ?: flight.priceCurrency).uppercase()
-        val oldPrice = Output.formatPrice(flight.priceAmount, flight.priceCurrency)
+        val newCurrency = (currency ?: flightWithPrice.priceCurrency).uppercase()
+        val oldPrice = Output.formatPrice(flightWithPrice.priceAmount, flightWithPrice.priceCurrency)
         val newPrice = Output.formatPrice(amount, newCurrency)
 
-        // Update flight price
-        if (FlightQueries.updatePrice(flight.id, amount, newCurrency) == null) {
-            Output.error("Failed to update price")
-            return 1
-        }
-
-        // Record in price history
+        // Record in price history (this is now the canonical way to update prices)
         PriceHistoryQueries.create(
             PriceHistoryDto(
-                flightId = flight.id,
+                flightId = flightWithPrice.flight.id,
                 amount = amount,
                 currency = newCurrency,
                 checkedAt = Instant.now().toString(),
+                priceMarket = flightWithPrice.priceMarket,
             ),
         )
 
-        val change = amount - flight.priceAmount
+        val change = amount - flightWithPrice.priceAmount
         val changeStr =
             when {
                 change > 0 -> "+${Output.formatPrice(change, newCurrency)}"
@@ -1187,11 +1182,12 @@ class FlightPriceCommand : Callable<Int> {
 }
 
 /**
- * Mark a flight as stale (needs price refresh).
+ * Show price staleness status for a flight.
+ * Since the stale flag is removed, this now shows when the flight was last checked.
  */
 @Command(
     name = "stale",
-    description = ["Mark a flight as stale (needs price refresh)"],
+    description = ["Show price staleness status for a flight"],
 )
 class FlightStaleCommand : Callable<Int> {
     @ParentCommand
@@ -1200,30 +1196,162 @@ class FlightStaleCommand : Callable<Int> {
     @Parameters(index = "0", description = ["Flight ID (or prefix)"])
     lateinit var id: String
 
-    @Option(names = ["--clear"], description = ["Clear stale flag instead of setting it"])
-    var clear: Boolean = false
+    @Option(names = ["--hours"], description = ["Consider stale after N hours"], defaultValue = "24")
+    var staleHours: Int = 24
 
     override fun call(): Int {
         parent.parent.ensureDb()
 
-        val flight = FlightQueries.getById(id) ?: FlightQueries.getByIdPrefix(id)
-        if (flight == null) {
-            Output.error("Flight '$id' not found")
+        val flightWithPrice = FlightQueries.getWithPrice(id) ?: FlightQueries.getWithPriceByPrefix(id)
+        if (flightWithPrice == null) {
+            Output.error("Flight '$id' not found (or no price history)")
             return 1
         }
 
-        val success = FlightQueries.markStale(flight.id, !clear)
-        if (success) {
-            if (clear) {
-                Output.success("Cleared stale flag on ${flight.id}")
-            } else {
-                Output.success("Marked ${flight.id} as stale")
-            }
+        val lastChecked = java.time.Instant.parse(flightWithPrice.priceCheckedAt)
+        val cutoff = java.time.Instant.now().minusSeconds(staleHours.toLong() * 3600)
+        val isStale = lastChecked.isBefore(cutoff)
+        val age = java.time.Duration.between(lastChecked, java.time.Instant.now()).toHours()
+
+        println("Flight: ${flightWithPrice.id}")
+        println("  Last checked: ${flightWithPrice.priceCheckedAt} (${age}h ago)")
+        println("  Status: ${if (isStale) "STALE (>${staleHours}h)" else "Current"}")
+        println("  Latest price: ${Output.formatPrice(flightWithPrice.priceAmount, flightWithPrice.priceCurrency)}")
+
+        return 0
+    }
+}
+
+/**
+ * Show price history across all flights in an investigation.
+ */
+@Command(
+    name = "history",
+    description = ["Show price history for all flights"],
+)
+class FlightHistoryCommand : Callable<Int> {
+    @ParentCommand
+    lateinit var parent: FlightCommand
+
+    @Parameters(index = "0", description = ["Investigation slug"])
+    lateinit var slug: String
+
+    @Option(names = ["--by-flight"], description = ["Group prices by flight"])
+    var byFlight: Boolean = false
+
+    @Option(names = ["--by-source"], description = ["Group prices by source agent"])
+    var bySource: Boolean = false
+
+    @Option(names = ["--limit"], description = ["Limit entries per flight"], defaultValue = "10")
+    var limit: Int = 10
+
+    @Option(names = ["--json"], description = ["Output as JSON"])
+    var jsonOutput: Boolean = false
+
+    override fun call(): Int {
+        parent.parent.ensureDb()
+
+        val flights = FlightQueries.listWithPrices(slug)
+        if (flights.isEmpty()) {
+            Output.warn("No flights in '$slug'")
             return 0
-        } else {
-            Output.error("Failed to update flight")
-            return 1
         }
+
+        // Get all price history for the investigation
+        val allHistory = PriceHistoryQueries.getByInvestigation(slug)
+        
+        if (jsonOutput) {
+            println(Output.toJson(allHistory))
+            return 0
+        }
+
+        if (byFlight) {
+            // Group by flight
+            val byFlightId = allHistory.groupBy { it.flightId }
+            
+            flights.sortedBy { it.priceAmount }.forEach { flight ->
+                val history = byFlightId[flight.id] ?: return@forEach
+                val outbound = Output.parseSegment(flight.outboundJson)
+                val airline = outbound?.legs?.firstOrNull()?.airline ?: "?"
+                
+                println()
+                println("${flight.id.take(8)} | $airline | ${flight.origin}→${flight.destination}")
+                println("─".repeat(60))
+                
+                var prevPrice: Double? = null
+                history.sortedByDescending { it.checkedAt }.take(limit).reversed().forEach { price ->
+                    val change = if (prevPrice != null) {
+                        val diff = price.amount - prevPrice!!
+                        when {
+                            diff > 0 -> "↑ +${Output.formatPrice(diff, price.currency)}"
+                            diff < 0 -> "↓ ${Output.formatPrice(diff, price.currency)}"
+                            else -> "—"
+                        }
+                    } else "—"
+                    
+                    val timestamp = price.checkedAt.take(16).replace("T", " ")
+                    val sourceTag = if (price.source != "kraftwerker") " [${price.source}]" else ""
+                    println("  $timestamp │ ${Output.formatPrice(price.amount, price.currency).padStart(9)} │ $change$sourceTag")
+                    prevPrice = price.amount
+                }
+            }
+        } else if (bySource) {
+            // Group by source
+            val bySourceName = allHistory.groupBy { it.source }
+            
+            bySourceName.forEach { (source, prices) ->
+                println()
+                println("Source: $source (${prices.size} observations)")
+                println("─".repeat(60))
+                
+                val uniqueFlights = prices.map { it.flightId }.distinct().size
+                val minPrice = prices.minOfOrNull { it.amount } ?: 0.0
+                val maxPrice = prices.maxOfOrNull { it.amount } ?: 0.0
+                val avgPrice = prices.map { it.amount }.average()
+                val currency = prices.firstOrNull()?.currency ?: "GBP"
+                
+                println("  Flights checked: $uniqueFlights")
+                println("  Price range: ${Output.formatPrice(minPrice, currency)} - ${Output.formatPrice(maxPrice, currency)}")
+                println("  Average: ${Output.formatPrice(avgPrice, currency)}")
+                
+                // Recent activity
+                val recent = prices.sortedByDescending { it.checkedAt }.take(5)
+                println("  Recent:")
+                recent.forEach { price ->
+                    val flight = flights.find { it.id == price.flightId }
+                    val route = flight?.let { "${it.origin}→${it.destination}" } ?: "?"
+                    val timestamp = price.checkedAt.take(16).replace("T", " ")
+                    println("    $timestamp │ ${Output.formatPrice(price.amount, price.currency)} │ $route")
+                }
+            }
+        } else {
+            // Chronological view - all prices sorted by time
+            println("Price History for $slug (${allHistory.size} observations)")
+            println("─".repeat(80))
+            
+            allHistory.sortedByDescending { it.checkedAt }.take(limit * flights.size).forEach { price ->
+                val flight = flights.find { it.id == price.flightId }
+                val outbound = flight?.let { Output.parseSegment(it.outboundJson) }
+                val airline = outbound?.legs?.firstOrNull()?.airline?.take(15) ?: "?"
+                val route = flight?.let { "${it.origin}→${it.destination}" } ?: "?"
+                val timestamp = price.checkedAt.take(16).replace("T", " ")
+                val sourceTag = if (price.source != "kraftwerker") " [${price.source}]" else ""
+                
+                println("$timestamp │ ${Output.formatPrice(price.amount, price.currency).padStart(9)} │ $route │ ${airline.padEnd(15)}$sourceTag")
+            }
+        }
+
+        // Summary
+        println()
+        println("Summary:")
+        println("  Total flights: ${flights.size}")
+        println("  Total price observations: ${allHistory.size}")
+        val sources = allHistory.map { it.source }.distinct()
+        if (sources.size > 1) {
+            println("  Sources: ${sources.joinToString(", ")}")
+        }
+        
+        return 0
     }
 }
 
@@ -1250,26 +1378,27 @@ class FlightRefreshCommand : Callable<Int> {
     override fun call(): Int {
         parent.parent.ensureDb()
 
-        val flights = FlightQueries.listByInvestigation(slug)
-        if (flights.isEmpty()) {
-            if (!linksOnly) Output.warn("No flights in '$slug'")
+        val flightsWithPrices = FlightQueries.listWithPrices(slug)
+        if (flightsWithPrices.isEmpty()) {
+            if (!linksOnly) Output.warn("No flights with prices in '$slug'")
             return 0
         }
 
-        // Get flights marked stale OR older than staleHours
+        // Get flights older than staleHours
         val cutoff = java.time.Instant.now().minusSeconds(staleHours.toLong() * 3600)
         val needsRefresh =
-            flights.filter { f ->
-                f.stale || java.time.Instant.parse(f.priceCheckedAt).isBefore(cutoff)
+            flightsWithPrices.filter { f ->
+                val lastChecked = java.time.Instant.parse(f.priceCheckedAt)
+                lastChecked.isBefore(cutoff)
             }
 
         if (linksOnly) {
             needsRefresh.forEach { println(it.shareLink) }
         } else {
             if (needsRefresh.isEmpty()) {
-                println("All ${flights.size} flights up to date")
+                println("All ${flightsWithPrices.size} flights up to date")
             } else {
-                println("Flights needing refresh (${needsRefresh.size}/${flights.size}):")
+                println("Flights needing refresh (${needsRefresh.size}/${flightsWithPrices.size}):")
                 println()
                 needsRefresh.forEach { f ->
                     val age =
@@ -1277,8 +1406,7 @@ class FlightRefreshCommand : Callable<Int> {
                             java.time.Instant.parse(f.priceCheckedAt),
                             java.time.Instant.now(),
                         ).toHours()
-                    val flag = if (f.stale) " [STALE]" else ""
-                    println("${f.id.take(8)} | ${age}h ago$flag | ${f.shareLink}")
+                    println("${f.id.take(8)} | ${age}h ago | ${f.shareLink}")
                 }
             }
         }
@@ -1468,7 +1596,7 @@ class FlightImportCommand : Callable<Int> {
 
         println("Processing ${importedFlights.size} flights...")
 
-        val dbFlights = FlightQueries.listByInvestigation(slug)
+        val dbFlightsWithPrices = FlightQueries.listWithPrices(slug)
         var updated = 0
         var unchanged = 0
         var notFound = 0
@@ -1476,7 +1604,7 @@ class FlightImportCommand : Callable<Int> {
 
         importedFlights.forEach { imported ->
             // Find matching flight in DB
-            val match = findMatchingFlight(dbFlights, imported)
+            val match = findMatchingFlight(dbFlightsWithPrices, imported)
 
             if (match != null) {
                 // Check if price changed
@@ -1494,27 +1622,31 @@ class FlightImportCommand : Callable<Int> {
                     if (dryRun) {
                         println("[DRY RUN] ${match.id.take(8)}: $oldPrice → $newPrice ($changeStr)")
                     } else {
-                        // Update price
-                        FlightQueries.updatePrice(match.id, imported.price, imported.currency)
-                        // Record history
+                        // Record new price in history (canonical way to update prices)
                         PriceHistoryQueries.create(
                             PriceHistoryDto(
                                 flightId = match.id,
                                 amount = imported.price,
                                 currency = imported.currency,
                                 checkedAt = java.time.Instant.now().toString(),
+                                priceMarket = match.priceMarket,
                             ),
                         )
-                        // Clear stale flag
-                        FlightQueries.markStale(match.id, false)
                         println("${match.id.take(8)}: $oldPrice → $newPrice ($changeStr)")
                     }
                     updated++
                 } else {
-                    // Same price, just update checked timestamp
+                    // Same price - record a check (shows we verified the price)
                     if (!dryRun) {
-                        FlightQueries.updatePriceCheckedAt(match.id)
-                        FlightQueries.markStale(match.id, false)
+                        PriceHistoryQueries.create(
+                            PriceHistoryDto(
+                                flightId = match.id,
+                                amount = imported.price,
+                                currency = imported.currency,
+                                checkedAt = java.time.Instant.now().toString(),
+                                priceMarket = match.priceMarket,
+                            ),
+                        )
                     }
                     unchanged++
                 }
@@ -1545,9 +1677,9 @@ class FlightImportCommand : Callable<Int> {
      * Matches on: origin, destination, departure date, airline
      */
     private fun findMatchingFlight(
-        dbFlights: List<FlightDto>,
+        dbFlights: List<FlightWithPrice>,
         imported: ImportFlight,
-    ): FlightDto? {
+    ): FlightWithPrice? {
         return dbFlights.find { db ->
             val outbound = Output.parseSegment(db.outboundJson)
             if (outbound == null) return@find false
@@ -1596,14 +1728,14 @@ class FlightMatchCommand : Callable<Int> {
     override fun call(): Int {
         parent.parent.ensureDb()
 
-        val flights = FlightQueries.listByInvestigation(slug)
-        if (flights.isEmpty()) {
+        val flightsWithPrices = FlightQueries.listWithPrices(slug)
+        if (flightsWithPrices.isEmpty()) {
             Output.error("No flights in '$slug'")
             return 1
         }
 
         val matches =
-            flights.filter { f ->
+            flightsWithPrices.filter { f ->
                 val outbound = Output.parseSegment(f.outboundJson) ?: return@filter false
                 val firstLeg = outbound.legs.firstOrNull() ?: return@filter false
 
@@ -1673,19 +1805,19 @@ class FlightDedupeCommand : Callable<Int> {
     override fun call(): Int {
         parent.parent.ensureDb()
 
-        val flights = FlightQueries.listByInvestigation(slug)
-        if (flights.isEmpty()) {
+        val flightsWithPrices = FlightQueries.listWithPrices(slug)
+        if (flightsWithPrices.isEmpty()) {
             println("No flights to dedupe")
             return 0
         }
 
-        println("Analyzing ${flights.size} flights...")
+        println("Analyzing ${flightsWithPrices.size} flights...")
 
         // Group by signature
-        val grouped = flights.groupBy { computeSignature(it) }
+        val grouped = flightsWithPrices.groupBy { computeSignature(it) }
         
-        var toDelete = mutableListOf<FlightDto>()
-        var toKeep = mutableListOf<FlightDto>()
+        var toDelete = mutableListOf<FlightWithPrice>()
+        var toKeep = mutableListOf<FlightWithPrice>()
 
         grouped.forEach { (signature, group) ->
             if (group.size == 1) {
@@ -1700,7 +1832,7 @@ class FlightDedupeCommand : Callable<Int> {
         }
 
         // Also mark invalid flights (0 duration) for deletion
-        val invalid = flights.filter { isInvalid(it) }
+        val invalid = flightsWithPrices.filter { isInvalid(it) }
         val invalidNotAlreadyMarked = invalid.filter { inv -> toDelete.none { it.id == inv.id } }
         toDelete.addAll(invalidNotAlreadyMarked)
         toKeep.removeAll { k -> invalid.any { it.id == k.id } }
@@ -1747,7 +1879,7 @@ class FlightDedupeCommand : Callable<Int> {
      * Compute a signature for grouping duplicate flights.
      * Format: {date}|{airline}|{origin}-{via...}-{dest}[|{return_date}|{airline}|{routing}]
      */
-    private fun computeSignature(flight: FlightDto): String {
+    private fun computeSignature(flight: FlightWithPrice): String {
         val outbound = Output.parseSegment(flight.outboundJson)
         val returnSeg = flight.returnJson?.let { Output.parseSegment(it) }
 
@@ -1776,7 +1908,7 @@ class FlightDedupeCommand : Callable<Int> {
     /**
      * Pick the best flight from a group of duplicates.
      */
-    private fun pickBest(group: List<FlightDto>, preferValid: Boolean): FlightDto {
+    private fun pickBest(group: List<FlightWithPrice>, preferValid: Boolean): FlightWithPrice {
         if (preferValid) {
             // Prefer valid flights (non-zero duration)
             val valid = group.filter { !isInvalid(it) }
@@ -1792,7 +1924,7 @@ class FlightDedupeCommand : Callable<Int> {
     /**
      * Check if a flight has invalid/placeholder data.
      */
-    private fun isInvalid(flight: FlightDto): Boolean {
+    private fun isInvalid(flight: FlightWithPrice): Boolean {
         val outbound = Output.parseSegment(flight.outboundJson) ?: return true
         
         // Check for zero duration (placeholder data)
@@ -1884,15 +2016,15 @@ class FlightExportTasksCommand : Callable<Int> {
     override fun call(): Int {
         parent.parent.ensureDb()
 
-        val flights = FlightQueries.listByInvestigation(slug)
-        if (flights.isEmpty()) {
+        val flightsWithPrices = FlightQueries.listWithPrices(slug)
+        if (flightsWithPrices.isEmpty()) {
             println("No flights found")
             return 1
         }
 
         // Filter to flights that need checking
         val cutoff = if (all) null else Instant.now().minusSeconds(staleHours.toLong() * 3600)
-        val toCheck = flights.filter { f ->
+        val toCheck = flightsWithPrices.filter { f ->
             if (f.shareLink.isBlank()) return@filter false
             if (cutoff == null) return@filter true
             
@@ -1990,9 +2122,9 @@ class FlightImportResultsCommand : Callable<Int> {
         var errors = 0
 
         results.results.forEach { result ->
-            val flight = FlightQueries.getById(result.id)
-            if (flight == null) {
-                println("  ⚠ Flight ${result.id.take(8)} not found in database")
+            val flightWithPrice = FlightQueries.getWithPrice(result.id)
+            if (flightWithPrice == null) {
+                println("  ⚠ Flight ${result.id.take(8)} not found in database (or no price history)")
                 errors++
                 return@forEach
             }
@@ -2000,43 +2132,50 @@ class FlightImportResultsCommand : Callable<Int> {
             when (result.status) {
                 "ok", "price_changed" -> {
                     val newPrice = result.price ?: return@forEach
-                    val currency = result.currency ?: flight.priceCurrency
-                    val priceChanged = newPrice != flight.priceAmount
+                    val currency = result.currency ?: flightWithPrice.priceCurrency
+                    val priceChanged = newPrice != flightWithPrice.priceAmount
 
                     if (priceChanged) {
-                        val diff = newPrice - flight.priceAmount
+                        val diff = newPrice - flightWithPrice.priceAmount
                         val diffStr = if (diff > 0) "+${Output.formatPrice(diff, currency)}" else Output.formatPrice(diff, currency)
-                        println("  ${if (diff > 0) "📈" else "📉"} ${flight.id.take(8)}: ${Output.formatPrice(flight.priceAmount, currency)} → ${Output.formatPrice(newPrice, currency)} ($diffStr)")
+                        println("  ${if (diff > 0) "📈" else "📉"} ${flightWithPrice.id.take(8)}: ${Output.formatPrice(flightWithPrice.priceAmount, currency)} → ${Output.formatPrice(newPrice, currency)} ($diffStr)")
                         
                         if (!dryRun) {
-                            // Record price history
+                            // Record price history (canonical way to update prices)
                             PriceHistoryQueries.create(
                                 PriceHistoryDto(
-                                    flightId = flight.id,
+                                    flightId = flightWithPrice.flight.id,
                                     amount = newPrice,
                                     currency = currency,
                                     checkedAt = result.checkedAt ?: Instant.now().toString(),
+                                    priceMarket = flightWithPrice.priceMarket,
                                 )
                             )
-                            // Update flight price
-                            FlightQueries.updatePrice(flight.id, newPrice, currency)
                         }
                         updated++
                     } else {
                         if (!dryRun) {
-                            // Just update the checked timestamp
-                            FlightQueries.updatePriceCheckedAt(flight.id)
+                            // Record check even if price unchanged (shows we verified)
+                            PriceHistoryQueries.create(
+                                PriceHistoryDto(
+                                    flightId = flightWithPrice.flight.id,
+                                    amount = newPrice,
+                                    currency = currency,
+                                    checkedAt = result.checkedAt ?: Instant.now().toString(),
+                                    priceMarket = flightWithPrice.priceMarket,
+                                )
+                            )
                         }
                         unchanged++
                     }
                 }
                 "unavailable" -> {
-                    println("  ❌ ${flight.id.take(8)}: No longer available${result.reason?.let { " ($it)" } ?: ""}")
+                    println("  ❌ ${flightWithPrice.id.take(8)}: No longer available${result.reason?.let { " ($it)" } ?: ""}")
                     unavailable++
                     // Could optionally mark as unavailable or delete
                 }
                 "error" -> {
-                    println("  ⚠ ${flight.id.take(8)}: Error - ${result.reason ?: "unknown"}")
+                    println("  ⚠ ${flightWithPrice.id.take(8)}: Error - ${result.reason ?: "unknown"}")
                     errors++
                 }
             }

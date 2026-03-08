@@ -1,6 +1,7 @@
 package com.clawfare.cli
 
 import com.clawfare.db.FlightDto
+import com.clawfare.db.FlightWithPrice
 import com.clawfare.db.InvestigationDto
 import com.clawfare.db.PriceHistoryDto
 import com.clawfare.model.FlightSegment
@@ -72,9 +73,62 @@ object Output {
 
     /**
      * Format a flight for display.
+     * Note: This version is for raw FlightDto without price info.
      */
     fun formatFlight(
         flight: FlightDto,
+        segment: FlightSegment?,
+        returnSeg: FlightSegment?,
+    ): String =
+        buildString {
+            appendLine("Flight: ${flight.id}")
+            appendLine("  Investigation: ${flight.investigationSlug}")
+            appendLine("  Route:     ${flight.origin} → ${flight.destination}")
+            appendLine("  Type:      ${flight.tripType} / ${flight.ticketStructure}")
+            appendLine("  Source:    ${flight.source}")
+            flight.aircraftType?.let { appendLine("  Aircraft:  $it") }
+            flight.fareBrand?.let { appendLine("  Fare:      $it") }
+            flight.disqualified?.let { appendLine("  ❌ Disqualified: $it") }
+
+            if (segment != null) {
+                appendLine()
+                appendLine("  Outbound:")
+                appendLine("    ${segment.departAirport} → ${segment.arriveAirport}")
+                appendLine("    Depart:  ${segment.departTime}")
+                appendLine("    Arrive:  ${segment.arriveTime}")
+                appendLine("    Duration: ${formatDuration(segment.durationMinutes)}")
+                appendLine("    Stops:   ${segment.stops}")
+                appendSegmentLegs(this, segment)
+            }
+
+            if (returnSeg != null) {
+                appendLine()
+                appendLine("  Return:")
+                appendLine("    ${returnSeg.departAirport} → ${returnSeg.arriveAirport}")
+                appendLine("    Depart:  ${returnSeg.departTime}")
+                appendLine("    Arrive:  ${returnSeg.arriveTime}")
+                appendLine("    Duration: ${formatDuration(returnSeg.durationMinutes)}")
+                appendLine("    Stops:   ${returnSeg.stops}")
+                appendSegmentLegs(this, returnSeg)
+            }
+
+            if (!flight.tags.isNullOrBlank()) {
+                appendLine()
+                appendLine("  Tags:      ${flight.tags}")
+            }
+            if (!flight.notes.isNullOrBlank()) {
+                appendLine("  Notes:     ${flight.notes}")
+            }
+            appendLine()
+            appendLine("  Link:      ${flight.shareLink}")
+            appendLine("  Captured:  ${flight.capturedAt}")
+        }
+
+    /**
+     * Format a flight with price for display.
+     */
+    fun formatFlightWithPrice(
+        flight: FlightWithPrice,
         segment: FlightSegment?,
         returnSeg: FlightSegment?,
     ): String =
@@ -124,12 +178,44 @@ object Output {
             appendLine()
             appendLine("  Link:      ${flight.shareLink}")
             appendLine("  Captured:  ${flight.capturedAt}")
+            appendLine("  Last check: ${flight.priceCheckedAt}")
         }
 
     /**
-     * Format a list of flights as a compact table.
+     * Format a list of flights as a compact table (without prices - use formatFlightWithPriceTable for that).
      */
     fun formatFlightTable(flights: List<FlightDto>): String {
+        if (flights.isEmpty()) {
+            return "No flights found."
+        }
+
+        val headers = listOf("ID", "Cabin", "Airline", "Route", "Layover", "Depart", "Type")
+        val rows =
+            flights.map { flight ->
+                val outbound = parseSegment(flight.outboundJson)
+                val returnSeg = flight.returnJson?.let { parseSegment(it) }
+                val airline = outbound?.legs?.firstOrNull()?.airline ?: "?"
+                val layover = formatLayovers(outbound, returnSeg)
+                val departDate = outbound?.departTime?.substring(0, 10) ?: "?"
+                val typeFlag = if (flight.tripType == "round_trip") "RT" else "OW"
+                listOf(
+                    flight.id.take(8),
+                    flight.bookingClass ?: "?",
+                    airline,
+                    "${flight.origin}→${flight.destination}",
+                    layover,
+                    departDate,
+                    typeFlag,
+                )
+            }
+
+        return formatTable(headers, rows)
+    }
+
+    /**
+     * Format a list of flights with prices as a compact table.
+     */
+    fun formatFlightWithPriceTable(flights: List<FlightWithPrice>): String {
         if (flights.isEmpty()) {
             return "No flights found."
         }
@@ -142,9 +228,7 @@ object Output {
                 val airline = outbound?.legs?.firstOrNull()?.airline ?: "?"
                 val layover = formatLayovers(outbound, returnSeg)
                 val departDate = outbound?.departTime?.substring(0, 10) ?: "?"
-                val typeFlag =
-                    (if (flight.tripType == "round_trip") "RT" else "OW") +
-                        (if (flight.stale) " ⚠" else "")
+                val typeFlag = if (flight.tripType == "round_trip") "RT" else "OW"
                 listOf(
                     flight.id.take(8),
                     formatPrice(flight.priceAmount, flight.priceCurrency),

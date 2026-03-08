@@ -2,6 +2,8 @@ package com.clawfare.export
 
 import com.clawfare.db.FlightDto
 import com.clawfare.db.FlightQueries
+import com.clawfare.db.FlightWithPrice
+import com.clawfare.db.PriceHistoryQueries
 import com.clawfare.model.FlightEntry
 import com.clawfare.model.FlightSegment
 import com.clawfare.model.TicketStructure
@@ -36,8 +38,8 @@ object JsonExporter {
         investigationSlug: String,
         prettyPrint: Boolean = true,
     ): String {
-        val flights = FlightQueries.listByInvestigation(investigationSlug)
-        return exportFlights(flights, prettyPrint)
+        val flightsWithPrices = FlightQueries.listWithPrices(investigationSlug)
+        return exportFlightsWithPrices(flightsWithPrices, prettyPrint)
     }
 
     /**
@@ -47,22 +49,36 @@ object JsonExporter {
      * @return JSON string containing array of FlightEntry objects
      */
     fun exportAll(prettyPrint: Boolean = true): String {
+        // Get all flights, then get their prices
         val flights = FlightQueries.listAll()
-        return exportFlights(flights, prettyPrint)
+        val flightsWithPrices = flights.mapNotNull { flight ->
+            val latestPrice = PriceHistoryQueries.getLatest(flight.id)
+            if (latestPrice != null) {
+                FlightWithPrice(
+                    flight = flight,
+                    priceAmount = latestPrice.amount,
+                    priceCurrency = latestPrice.currency,
+                    priceMarket = latestPrice.priceMarket,
+                    priceCheckedAt = latestPrice.checkedAt,
+                    priceSource = latestPrice.source,
+                )
+            } else null
+        }
+        return exportFlightsWithPrices(flightsWithPrices, prettyPrint)
     }
 
     /**
-     * Export a list of FlightDto objects to JSON.
+     * Export a list of FlightWithPrice objects to JSON.
      *
-     * @param flights List of FlightDto objects to export
+     * @param flights List of FlightWithPrice objects to export
      * @param prettyPrint Whether to format the JSON output
      * @return JSON string containing array of FlightEntry objects
      */
-    fun exportFlights(
-        flights: List<FlightDto>,
+    fun exportFlightsWithPrices(
+        flights: List<FlightWithPrice>,
         prettyPrint: Boolean = true,
     ): String {
-        val entries = flights.map { dtoToEntry(it) }
+        val entries = flights.map { flightWithPriceToEntry(it) }
         return if (prettyPrint) {
             json.encodeToString(entries)
         } else {
@@ -81,8 +97,8 @@ object JsonExporter {
         flightId: String,
         prettyPrint: Boolean = true,
     ): String? {
-        val flight = FlightQueries.getById(flightId) ?: return null
-        val entry = dtoToEntry(flight)
+        val flightWithPrice = FlightQueries.getWithPrice(flightId) ?: return null
+        val entry = flightWithPriceToEntry(flightWithPrice)
         return if (prettyPrint) {
             json.encodeToString(entry)
         } else {
@@ -91,42 +107,42 @@ object JsonExporter {
     }
 
     /**
-     * Convert a FlightDto back to a FlightEntry.
+     * Convert a FlightWithPrice to a FlightEntry.
      */
-    fun dtoToEntry(dto: FlightDto): FlightEntry {
-        val outbound = json.decodeFromString<FlightSegment>(dto.outboundJson)
-        val returnSegment = dto.returnJson?.let { json.decodeFromString<FlightSegment>(it) }
-        val tags = dto.tags?.let { json.decodeFromString<List<String>>(it) }
+    fun flightWithPriceToEntry(fwp: FlightWithPrice): FlightEntry {
+        val outbound = json.decodeFromString<FlightSegment>(fwp.outboundJson)
+        val returnSegment = fwp.returnJson?.let { json.decodeFromString<FlightSegment>(it) }
+        val tags = fwp.tags?.let { json.decodeFromString<List<String>>(it) }
 
         return FlightEntry(
-            id = dto.id,
-            shareLink = dto.shareLink,
-            source = dto.source,
+            id = fwp.id,
+            shareLink = fwp.shareLink,
+            source = fwp.source,
             tripType =
-                when (dto.tripType) {
+                when (fwp.tripType) {
                     "round_trip" -> TripType.ROUND_TRIP
                     "one_way" -> TripType.ONE_WAY
                     else -> TripType.ONE_WAY
                 },
             ticketStructure =
-                when (dto.ticketStructure) {
+                when (fwp.ticketStructure) {
                     "single" -> TicketStructure.SINGLE
                     "two_one_ways" -> TicketStructure.TWO_ONE_WAYS
                     else -> TicketStructure.SINGLE
                 },
-            priceCurrency = dto.priceCurrency,
-            priceAmount = dto.priceAmount,
-            priceMarket = dto.priceMarket,
-            capturedAt = dto.capturedAt,
-            priceCheckedAt = dto.priceCheckedAt,
-            origin = dto.origin,
-            destination = dto.destination,
+            priceCurrency = fwp.priceCurrency,
+            priceAmount = fwp.priceAmount,
+            priceMarket = fwp.priceMarket,
+            capturedAt = fwp.capturedAt,
+            priceCheckedAt = fwp.priceCheckedAt,
+            origin = fwp.origin,
+            destination = fwp.destination,
             outbound = outbound,
             returnSegment = returnSegment,
-            notes = dto.notes,
+            notes = fwp.notes,
             tags = tags,
-            bookingClass = dto.bookingClass,
-            cabinMixed = dto.cabinMixed,
+            bookingClass = fwp.bookingClass,
+            cabinMixed = fwp.cabinMixed,
         )
     }
 }

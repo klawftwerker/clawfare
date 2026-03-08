@@ -1,7 +1,8 @@
 package com.clawfare.export
 
-import com.clawfare.db.FlightDto
 import com.clawfare.db.FlightQueries
+import com.clawfare.db.FlightWithPrice
+import com.clawfare.db.PriceHistoryQueries
 import com.clawfare.model.FlightSegment
 import kotlinx.serialization.json.Json
 import java.time.ZonedDateTime
@@ -28,8 +29,8 @@ object TopNGenerator {
         limit: Int = 10,
         title: String? = null,
     ): String {
-        val flights = FlightQueries.listByInvestigation(investigationSlug)
-        return generate(flights, limit, title ?: "Top $limit Flights: $investigationSlug")
+        val flightsWithPrices = FlightQueries.listWithPrices(investigationSlug)
+        return generate(flightsWithPrices, limit, title ?: "Top $limit Flights: $investigationSlug")
     }
 
     /**
@@ -43,8 +44,22 @@ object TopNGenerator {
         limit: Int = 10,
         title: String? = null,
     ): String {
+        // Get all flights with their prices
         val flights = FlightQueries.listAll()
-        return generate(flights, limit, title ?: "Top $limit Flights")
+        val flightsWithPrices = flights.mapNotNull { flight ->
+            val latestPrice = PriceHistoryQueries.getLatest(flight.id)
+            if (latestPrice != null) {
+                FlightWithPrice(
+                    flight = flight,
+                    priceAmount = latestPrice.amount,
+                    priceCurrency = latestPrice.currency,
+                    priceMarket = latestPrice.priceMarket,
+                    priceCheckedAt = latestPrice.checkedAt,
+                    priceSource = latestPrice.source,
+                )
+            } else null
+        }
+        return generate(flightsWithPrices, limit, title ?: "Top $limit Flights")
     }
 
     /**
@@ -56,7 +71,7 @@ object TopNGenerator {
      * @return Markdown string with flight rankings
      */
     fun generate(
-        flights: List<FlightDto>,
+        flights: List<FlightWithPrice>,
         limit: Int = 10,
         title: String = "Top Flights",
     ): String {
@@ -107,7 +122,7 @@ object TopNGenerator {
      */
     private fun formatFlightEntry(
         rank: Int,
-        flight: FlightDto,
+        flight: FlightWithPrice,
     ): String {
         val outbound = json.decodeFromString<FlightSegment>(flight.outboundJson)
         val returnSegment = flight.returnJson?.let { json.decodeFromString<FlightSegment>(it) }
