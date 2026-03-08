@@ -1414,8 +1414,8 @@ class ScrapeUpdateCommand : Callable<Int> {
     @ParentCommand
     lateinit var parent: ScrapeCommand
 
-    @Parameters(index = "0", description = ["Investigation slug"])
-    lateinit var slug: String
+    @Parameters(index = "0", description = ["Investigation slug"], defaultValue = "")
+    var slug: String = ""
 
     @Option(names = ["--dry-run"], description = ["Show what would be updated without making changes"])
     var dryRun: Boolean = false
@@ -1423,7 +1423,41 @@ class ScrapeUpdateCommand : Callable<Int> {
     @Option(names = ["--add-new"], description = ["Add new flights not in DB"])
     var addNew: Boolean = false
 
+    @Option(names = ["--schema"], description = ["Print expected JSON schema and exit"])
+    var showSchema: Boolean = false
+
     override fun call(): Int {
+        if (showSchema) {
+            println(
+                """
+                |Expected input: JSON array of flight objects
+                |
+                |[
+                |  {
+                |    "origin": "LHR",           // required - origin airport code
+                |    "destination": "NRT",      // required - destination airport code  
+                |    "departDate": "2026-05-10", // required - YYYY-MM-DD
+                |    "airline": "Asiana Airlines", // required - airline name for matching
+                |    "price": 920.00,           // required - price amount
+                |    "currency": "GBP",         // optional - defaults to GBP
+                |    "airlineCode": "OZ",       // optional - IATA code
+                |    "returnDate": "2026-06-01", // optional - for round trips
+                |    "departTime": "16:35",     // optional - HH:MM for stricter matching
+                |    "link": "https://..."      // optional - booking link
+                |  }
+                |]
+                |
+                |Matching: Finds DB flights by origin + destination + departDate + airline name.
+                """.trimMargin(),
+            )
+            return 0
+        }
+
+        if (slug.isBlank()) {
+            Output.error("Investigation slug required (or use --schema)")
+            return 1
+        }
+
         parent.parent.ensureDb()
 
         val inv = InvestigationQueries.getBySlug(slug)
