@@ -785,6 +785,9 @@ class FlightListCommand : Callable<Int> {
     @Option(names = ["--json"], description = ["Output as JSON"])
     var jsonOutput: Boolean = false
 
+    @Option(names = ["--prices"], description = ["Show price history summary (min/max/change)"])
+    var showPrices: Boolean = false
+
     override fun call(): Int {
         parent.parent.ensureDb()
 
@@ -824,6 +827,44 @@ class FlightListCommand : Callable<Int> {
 
         if (jsonOutput) {
             println(Output.toJson(flights))
+        } else if (showPrices) {
+            // Show with price history summary
+            println("ID       │ Current   │ Min       │ Max       │ Change    │ Airline             │ Route   │ Depart")
+            println("─────────┼───────────┼───────────┼───────────┼───────────┼─────────────────────┼─────────┼───────────")
+            
+            flights.forEach { f ->
+                val history = PriceHistoryQueries.getByFlightId(f.id)
+                val outbound = Output.parseSegment(f.outboundJson)
+                val airline = outbound?.legs?.firstOrNull()?.airline?.take(19) ?: "?"
+                val departDate = outbound?.departTime?.take(10) ?: "?"
+                
+                val minPrice = history.minOfOrNull { it.amount } ?: f.priceAmount
+                val maxPrice = history.maxOfOrNull { it.amount } ?: f.priceAmount
+                val firstPrice = history.minByOrNull { it.checkedAt }?.amount ?: f.priceAmount
+                val change = f.priceAmount - firstPrice
+                val changeStr = when {
+                    change > 0 -> "↑ +${Output.formatPrice(change, f.priceCurrency)}"
+                    change < 0 -> "↓ ${Output.formatPrice(change, f.priceCurrency)}"
+                    else -> "—"
+                }
+                
+                println("${f.id.take(8)} │ ${Output.formatPrice(f.priceAmount, f.priceCurrency).padStart(9)} │ ${Output.formatPrice(minPrice, f.priceCurrency).padStart(9)} │ ${Output.formatPrice(maxPrice, f.priceCurrency).padStart(9)} │ ${changeStr.padStart(9)} │ ${airline.padEnd(19)} │ ${f.origin}→${f.destination} │ $departDate")
+            }
+            
+            // Summary
+            println()
+            val allHistory = flights.flatMap { PriceHistoryQueries.getByFlightId(it.id) }
+            val pricesDown = flights.count { f ->
+                val history = PriceHistoryQueries.getByFlightId(f.id)
+                val first = history.minByOrNull { it.checkedAt }?.amount ?: f.priceAmount
+                f.priceAmount < first
+            }
+            val pricesUp = flights.count { f ->
+                val history = PriceHistoryQueries.getByFlightId(f.id)
+                val first = history.minByOrNull { it.checkedAt }?.amount ?: f.priceAmount
+                f.priceAmount > first
+            }
+            println("${flights.size} flights │ ${allHistory.size} price observations │ $pricesDown↓ down │ $pricesUp↑ up │ ${flights.size - pricesDown - pricesUp} unchanged")
         } else {
             println(Output.formatFlightWithPriceTable(flights))
         }
