@@ -97,12 +97,7 @@ object Output {
                 appendLine("    Arrive:  ${segment.arriveTime}")
                 appendLine("    Duration: ${formatDuration(segment.durationMinutes)}")
                 appendLine("    Stops:   ${segment.stops}")
-                segment.legs.forEachIndexed { i, leg ->
-                    appendLine(
-                        "    Leg ${i + 1}: ${leg.airlineCode}${leg.flightNumber} " +
-                            "${leg.departAirport}→${leg.arriveAirport} (${leg.airline})",
-                    )
-                }
+                appendSegmentLegs(this, segment)
             }
 
             if (returnSeg != null) {
@@ -113,12 +108,7 @@ object Output {
                 appendLine("    Arrive:  ${returnSeg.arriveTime}")
                 appendLine("    Duration: ${formatDuration(returnSeg.durationMinutes)}")
                 appendLine("    Stops:   ${returnSeg.stops}")
-                returnSeg.legs.forEachIndexed { i, leg ->
-                    appendLine(
-                        "    Leg ${i + 1}: ${leg.airlineCode}${leg.flightNumber} " +
-                            "${leg.departAirport}→${leg.arriveAirport} (${leg.airline})",
-                    )
-                }
+                appendSegmentLegs(this, returnSeg)
             }
 
             if (!flight.tags.isNullOrBlank()) {
@@ -206,6 +196,45 @@ object Output {
 
         return totalLayover
     }
+
+    /**
+     * Append segment legs with layover times between them.
+     */
+    private fun appendSegmentLegs(
+        sb: StringBuilder,
+        segment: FlightSegment,
+    ) {
+        segment.legs.forEachIndexed { i, leg ->
+            sb.appendLine(
+                "    Leg ${i + 1}: ${leg.airlineCode}${leg.flightNumber} " +
+                    "${leg.departAirport}→${leg.arriveAirport} (${leg.airline})",
+            )
+            sb.appendLine(
+                "            ${formatTime(leg.departTime)} → ${formatTime(leg.arriveTime)} " +
+                    "(${formatDuration(leg.durationMinutes)})",
+            )
+
+            // Show layover if there's a next leg
+            if (i < segment.legs.size - 1) {
+                val nextLeg = segment.legs[i + 1]
+                val arriveTime = java.time.OffsetDateTime.parse(leg.arriveTime)
+                val departTime = java.time.OffsetDateTime.parse(nextLeg.departTime)
+                val layoverMinutes = java.time.Duration.between(arriveTime, departTime).toMinutes().toInt()
+                sb.appendLine("            ⏱ ${formatDuration(layoverMinutes)} layover in ${leg.arriveAirport}")
+            }
+        }
+    }
+
+    /**
+     * Format a timestamp to just time portion.
+     */
+    fun formatTime(isoTime: String): String =
+        try {
+            val dt = java.time.OffsetDateTime.parse(isoTime)
+            dt.toLocalTime().toString().substring(0, 5)
+        } catch (_: Exception) {
+            isoTime
+        }
 
     /**
      * Parse a FlightSegment from JSON.
