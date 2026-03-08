@@ -3,6 +3,7 @@ plugins {
     kotlin("plugin.serialization") version "2.1.10"
     application
     id("org.jlleitschuh.gradle.ktlint") version "12.1.1"
+    id("org.graalvm.buildtools.native") version "0.10.4"
 }
 
 group = "com.clawfare"
@@ -15,6 +16,7 @@ repositories {
 dependencies {
     // CLI
     implementation("info.picocli:picocli:4.7.6")
+    annotationProcessor("info.picocli:picocli-codegen:4.7.6")
 
     // Database
     implementation("org.xerial:sqlite-jdbc:3.46.1.3")
@@ -67,4 +69,18 @@ ktlint {
 tasks.register("codeCheck") {
     description = "Run linting and coverage verification"
     dependsOn("ktlintCheck")
+}
+
+// GraalVM native-image configuration
+graalvmNative {
+    binaries {
+        named("main") {
+            imageName.set("clawfare")
+            mainClass.set("com.clawfare.MainKt")
+            buildArgs.add("-H:+ReportExceptionStackTraces")
+            // SQLite native library export path
+            buildArgs.add("-Dorg.sqlite.lib.exportPath=${project.layout.buildDirectory.get()}/native/nativeCompile")
+        }
+    }
+    toolchainDetection.set(false)
 }
