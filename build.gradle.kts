@@ -24,6 +24,9 @@ dependencies {
     // JSON
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
 
+    // Logging - use nop to suppress SLF4J warnings
+    implementation("org.slf4j:slf4j-nop:2.0.16")
+
     // Testing
     testImplementation(kotlin("test"))
     testImplementation("org.junit.jupiter:junit-jupiter:5.11.3")
@@ -32,6 +35,9 @@ dependencies {
 
 application {
     mainClass.set("com.clawfare.MainKt")
+    applicationDefaultJvmArgs = listOf(
+        "--enable-native-access=ALL-UNNAMED",
+    )
 }
 
 kotlin {

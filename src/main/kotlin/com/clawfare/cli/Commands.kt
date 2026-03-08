@@ -10,6 +10,7 @@ import com.clawfare.db.PriceHistoryQueries
 import com.clawfare.model.FlightSegment
 import com.clawfare.model.FlightValidator
 import kotlinx.serialization.json.Json
+import picocli.CommandLine
 import picocli.CommandLine.Command
 import picocli.CommandLine.Option
 import picocli.CommandLine.Parameters
@@ -41,7 +42,7 @@ class InvCommand : Callable<Int> {
     lateinit var parent: ClawfareCommand
 
     override fun call(): Int {
-        println("Use 'clawfare inv --help' for available subcommands")
+        CommandLine(this).usage(System.out)
         return 0
     }
 }
@@ -433,7 +434,7 @@ class FlightCommand : Callable<Int> {
     lateinit var parent: ClawfareCommand
 
     override fun call(): Int {
-        println("Use 'clawfare flight --help' for available subcommands")
+        CommandLine(this).usage(System.out)
         return 0
     }
 }
@@ -1101,8 +1102,8 @@ class ClawfareCommand : Callable<Int> {
     }
 
     override fun call(): Int {
-        println("Flight price investigation tracker")
-        println("Use 'clawfare --help' for available commands")
+        // No subcommand provided - show help
+        CommandLine(this).usage(System.out)
         return 0
     }
 }
