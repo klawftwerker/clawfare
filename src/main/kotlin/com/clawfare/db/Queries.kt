@@ -2,6 +2,7 @@ package com.clawfare.db
 
 import org.jetbrains.exposed.sql.ResultRow
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
+import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.deleteWhere
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.selectAll
@@ -53,6 +54,7 @@ data class FlightDto(
     val returnJson: String? = null,
     val bookingClass: String? = null,
     val cabinMixed: Boolean = false,
+    val stale: Boolean = false,
     val notes: String? = null,
     val tags: String? = null,
     val capturedAt: String = Instant.now().toString(),
@@ -235,6 +237,7 @@ object FlightQueries {
                 it[returnJson] = dto.returnJson
                 it[bookingClass] = dto.bookingClass
                 it[cabinMixed] = if (dto.cabinMixed) 1 else 0
+                it[stale] = if (dto.stale) 1 else 0
                 it[notes] = dto.notes
                 it[tags] = dto.tags
                 it[capturedAt] = dto.capturedAt
@@ -332,6 +335,7 @@ object FlightQueries {
                     it[returnJson] = dto.returnJson
                     it[bookingClass] = dto.bookingClass
                     it[cabinMixed] = if (dto.cabinMixed) 1 else 0
+                    it[stale] = if (dto.stale) 1 else 0
                     it[notes] = dto.notes
                     it[tags] = dto.tags
                     it[priceCheckedAt] = Instant.now().toString()
@@ -355,8 +359,33 @@ object FlightQueries {
                     it[priceAmount] = amount
                     it[priceCurrency] = currency
                     it[priceCheckedAt] = Instant.now().toString()
+                    it[stale] = 0 // Clear stale flag when price is updated
                 }
             if (updated > 0) getById(id) else null
+        }
+
+    /**
+     * Mark a flight as stale (needs price refresh).
+     */
+    fun markStale(
+        id: String,
+        isStale: Boolean = true,
+    ): Boolean =
+        transaction {
+            Flights.update({ Flights.id eq id }) {
+                it[stale] = if (isStale) 1 else 0
+            } > 0
+        }
+
+    /**
+     * Get all stale flights for an investigation.
+     */
+    fun listStale(investigationSlug: String): List<FlightDto> =
+        transaction {
+            Flights
+                .selectAll()
+                .where { (Flights.investigationSlug eq investigationSlug) and (Flights.stale eq 1) }
+                .map { it.toFlightDto() }
         }
 
     /**
@@ -413,6 +442,7 @@ object FlightQueries {
             returnJson = this[Flights.returnJson],
             bookingClass = this[Flights.bookingClass],
             cabinMixed = this[Flights.cabinMixed] == 1,
+            stale = this[Flights.stale] == 1,
             notes = this[Flights.notes],
             tags = this[Flights.tags],
             capturedAt = this[Flights.capturedAt],

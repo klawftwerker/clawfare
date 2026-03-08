@@ -50,6 +50,7 @@ object Flights : Table("flights") {
 
     val bookingClass = text("booking_class").nullable()
     val cabinMixed = integer("cabin_mixed").default(0)
+    val stale = integer("stale").default(0)
     val notes = text("notes").nullable()
     val tags = text("tags").nullable()
 

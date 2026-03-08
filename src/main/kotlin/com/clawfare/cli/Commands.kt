@@ -427,6 +427,7 @@ class InvConfigCommand : Callable<Int> {
         FlightTagCommand::class,
         FlightUntagCommand::class,
         FlightPriceCommand::class,
+        FlightStaleCommand::class,
         FlightRefreshCommand::class,
         FlightValidateCommand::class,
     ],
@@ -913,6 +914,47 @@ class FlightPriceCommand : Callable<Int> {
 }
 
 /**
+ * Mark a flight as stale (needs price refresh).
+ */
+@Command(
+    name = "stale",
+    description = ["Mark a flight as stale (needs price refresh)"],
+)
+class FlightStaleCommand : Callable<Int> {
+    @ParentCommand
+    lateinit var parent: FlightCommand
+
+    @Parameters(index = "0", description = ["Flight ID (or prefix)"])
+    lateinit var id: String
+
+    @Option(names = ["--clear"], description = ["Clear stale flag instead of setting it"])
+    var clear: Boolean = false
+
+    override fun call(): Int {
+        parent.parent.ensureDb()
+
+        val flight = FlightQueries.getById(id) ?: FlightQueries.getByIdPrefix(id)
+        if (flight == null) {
+            Output.error("Flight '$id' not found")
+            return 1
+        }
+
+        val success = FlightQueries.markStale(flight.id, !clear)
+        if (success) {
+            if (clear) {
+                Output.success("Cleared stale flag on ${flight.id}")
+            } else {
+                Output.success("Marked ${flight.id} as stale")
+            }
+            return 0
+        } else {
+            Output.error("Failed to update flight")
+            return 1
+        }
+    }
+}
+
+/**
  * List flights needing price refresh.
  */
 @Command(
@@ -941,27 +983,29 @@ class FlightRefreshCommand : Callable<Int> {
             return 0
         }
 
+        // Get flights marked stale OR older than staleHours
         val cutoff = java.time.Instant.now().minusSeconds(staleHours.toLong() * 3600)
-        val stale =
+        val needsRefresh =
             flights.filter { f ->
-                val checkedAt = java.time.Instant.parse(f.priceCheckedAt)
-                checkedAt.isBefore(cutoff)
+                f.stale || java.time.Instant.parse(f.priceCheckedAt).isBefore(cutoff)
             }
 
         if (linksOnly) {
-            stale.forEach { println(it.shareLink) }
+            needsRefresh.forEach { println(it.shareLink) }
         } else {
-            if (stale.isEmpty()) {
-                println("All ${flights.size} flights checked within ${staleHours}h")
+            if (needsRefresh.isEmpty()) {
+                println("All ${flights.size} flights up to date")
             } else {
-                println("Flights needing refresh (${stale.size}/${flights.size}):")
+                println("Flights needing refresh (${needsRefresh.size}/${flights.size}):")
                 println()
-                stale.forEach { f ->
-                    val age = java.time.Duration.between(
-                        java.time.Instant.parse(f.priceCheckedAt),
-                        java.time.Instant.now(),
-                    ).toHours()
-                    println("${f.id} | ${age}h ago | ${f.shareLink}")
+                needsRefresh.forEach { f ->
+                    val age =
+                        java.time.Duration.between(
+                            java.time.Instant.parse(f.priceCheckedAt),
+                            java.time.Instant.now(),
+                        ).toHours()
+                    val flag = if (f.stale) " [STALE]" else ""
+                    println("${f.id.take(8)} | ${age}h ago$flag | ${f.shareLink}")
                 }
             }
         }

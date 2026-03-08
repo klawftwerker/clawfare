@@ -139,6 +139,9 @@ object Output {
                 val airline = outbound?.legs?.firstOrNull()?.airlineCode ?: "?"
                 val layover = formatLayovers(outbound, returnSeg)
                 val departDate = outbound?.departTime?.substring(0, 10) ?: "?"
+                val typeFlag =
+                    (if (flight.tripType == "round_trip") "RT" else "OW") +
+                        (if (flight.stale) " ⚠" else "")
                 listOf(
                     flight.id.take(8),
                     formatPrice(flight.priceAmount, flight.priceCurrency),
@@ -147,7 +150,7 @@ object Output {
                     "${flight.origin}→${flight.destination}",
                     layover,
                     departDate,
-                    if (flight.tripType == "round_trip") "RT" else "OW",
+                    typeFlag,
                 )
             }
 
