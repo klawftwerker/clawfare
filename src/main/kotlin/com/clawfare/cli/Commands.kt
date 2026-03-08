@@ -588,6 +588,8 @@ class InvUrlsCommand : Callable<Int> {
         FlightImportCommand::class,
         FlightMatchCommand::class,
         FlightDedupeCommand::class,
+        FlightExportTasksCommand::class,
+        FlightImportResultsCommand::class,
     ],
 )
 class FlightCommand : Callable<Int> {
@@ -1801,6 +1803,258 @@ class FlightDedupeCommand : Callable<Int> {
         if (firstLeg.durationMinutes == 0) return true
         
         return false
+    }
+}
+
+// ============================================================================
+// Price Check Task Exchange
+// ============================================================================
+
+/**
+ * Task file format for price checking.
+ */
+@kotlinx.serialization.Serializable
+data class PriceCheckTask(
+    val taskId: String,
+    val createdAt: String,
+    val investigation: String,
+    val flights: List<PriceCheckFlight>,
+)
+
+@kotlinx.serialization.Serializable
+data class PriceCheckFlight(
+    val id: String,
+    val shareLink: String,
+    val origin: String,
+    val destination: String,
+    val departDate: String,
+    val returnDate: String? = null,
+    val airline: String,
+    val lastPrice: Double,
+    val currency: String,
+    val lastChecked: String? = null,
+)
+
+/**
+ * Result file format from price checking.
+ */
+@kotlinx.serialization.Serializable
+data class PriceCheckResults(
+    val taskId: String,
+    val completedAt: String,
+    val results: List<PriceCheckResult>,
+)
+
+@kotlinx.serialization.Serializable
+data class PriceCheckResult(
+    val id: String,
+    val status: String, // "ok", "price_changed", "unavailable", "error"
+    val price: Double? = null,
+    val currency: String? = null,
+    val checkedAt: String? = null,
+    val reason: String? = null,
+)
+
+/**
+ * Export flights as a task file for external price checking.
+ */
+@Command(
+    name = "export-tasks",
+    description = ["Export flights as task file for external price checking"],
+)
+class FlightExportTasksCommand : Callable<Int> {
+    @ParentCommand
+    lateinit var parent: FlightCommand
+
+    @Parameters(index = "0", description = ["Investigation slug"])
+    lateinit var slug: String
+
+    @Option(names = ["-o", "--output"], description = ["Output file path"])
+    var output: String? = null
+
+    @Option(names = ["--stale-hours"], description = ["Only include flights not checked in N hours"], defaultValue = "24")
+    var staleHours: Int = 24
+
+    @Option(names = ["--limit"], description = ["Maximum number of flights to export"])
+    var limit: Int? = null
+
+    @Option(names = ["--all"], description = ["Export all flights, not just stale ones"])
+    var all: Boolean = false
+
+    override fun call(): Int {
+        parent.parent.ensureDb()
+
+        val flights = FlightQueries.listByInvestigation(slug)
+        if (flights.isEmpty()) {
+            println("No flights found")
+            return 1
+        }
+
+        // Filter to flights that need checking
+        val cutoff = if (all) null else Instant.now().minusSeconds(staleHours.toLong() * 3600)
+        val toCheck = flights.filter { f ->
+            if (f.shareLink.isBlank()) return@filter false
+            if (cutoff == null) return@filter true
+            
+            val lastChecked = try { Instant.parse(f.priceCheckedAt) } catch (e: Exception) { null }
+            lastChecked == null || lastChecked.isBefore(cutoff)
+        }.let { list ->
+            limit?.let { list.take(it) } ?: list
+        }
+
+        if (toCheck.isEmpty()) {
+            println("No flights need price checking (all checked within ${staleHours}h)")
+            return 0
+        }
+
+        val taskId = "price-check-${slug}-${Instant.now().toString().take(10)}"
+        
+        val taskFlights = toCheck.map { f ->
+            val outbound = Output.parseSegment(f.outboundJson)
+            val firstLeg = outbound?.legs?.firstOrNull()
+            
+            PriceCheckFlight(
+                id = f.id,
+                shareLink = f.shareLink,
+                origin = f.origin,
+                destination = f.destination,
+                departDate = firstLeg?.departTime?.take(10) ?: "",
+                returnDate = f.returnJson?.let { Output.parseSegment(it) }?.legs?.firstOrNull()?.departTime?.take(10),
+                airline = firstLeg?.airline ?: "",
+                lastPrice = f.priceAmount,
+                currency = f.priceCurrency,
+                lastChecked = f.priceCheckedAt,
+            )
+        }
+
+        val task = PriceCheckTask(
+            taskId = taskId,
+            createdAt = Instant.now().toString(),
+            investigation = slug,
+            flights = taskFlights,
+        )
+
+        val json = Json { prettyPrint = true }
+        val content = json.encodeToString(PriceCheckTask.serializer(), task)
+
+        val outFile = output ?: "price-check-$slug.json"
+        java.io.File(outFile).writeText(content)
+        
+        Output.success("Exported ${toCheck.size} flights to $outFile")
+        println("Task ID: $taskId")
+        
+        return 0
+    }
+}
+
+/**
+ * Import price check results from external agent.
+ */
+@Command(
+    name = "import-results",
+    description = ["Import price check results from external agent"],
+)
+class FlightImportResultsCommand : Callable<Int> {
+    @ParentCommand
+    lateinit var parent: FlightCommand
+
+    @Parameters(index = "0", description = ["Results file path"])
+    lateinit var resultsFile: String
+
+    @Option(names = ["--dry-run"], description = ["Show what would be updated without making changes"])
+    var dryRun: Boolean = false
+
+    override fun call(): Int {
+        parent.parent.ensureDb()
+
+        val file = java.io.File(resultsFile)
+        if (!file.exists()) {
+            Output.error("File not found: $resultsFile")
+            return 1
+        }
+
+        val json = Json { ignoreUnknownKeys = true }
+        val results = try {
+            json.decodeFromString(PriceCheckResults.serializer(), file.readText())
+        } catch (e: Exception) {
+            Output.error("Failed to parse results: ${e.message}")
+            return 1
+        }
+
+        println("Processing ${results.results.size} results from task ${results.taskId}")
+        println()
+
+        var updated = 0
+        var unchanged = 0
+        var unavailable = 0
+        var errors = 0
+
+        results.results.forEach { result ->
+            val flight = FlightQueries.getById(result.id)
+            if (flight == null) {
+                println("  ⚠ Flight ${result.id.take(8)} not found in database")
+                errors++
+                return@forEach
+            }
+
+            when (result.status) {
+                "ok", "price_changed" -> {
+                    val newPrice = result.price ?: return@forEach
+                    val currency = result.currency ?: flight.priceCurrency
+                    val priceChanged = newPrice != flight.priceAmount
+
+                    if (priceChanged) {
+                        val diff = newPrice - flight.priceAmount
+                        val diffStr = if (diff > 0) "+${Output.formatPrice(diff, currency)}" else Output.formatPrice(diff, currency)
+                        println("  ${if (diff > 0) "📈" else "📉"} ${flight.id.take(8)}: ${Output.formatPrice(flight.priceAmount, currency)} → ${Output.formatPrice(newPrice, currency)} ($diffStr)")
+                        
+                        if (!dryRun) {
+                            // Record price history
+                            PriceHistoryQueries.create(
+                                PriceHistoryDto(
+                                    flightId = flight.id,
+                                    amount = newPrice,
+                                    currency = currency,
+                                    checkedAt = result.checkedAt ?: Instant.now().toString(),
+                                )
+                            )
+                            // Update flight price
+                            FlightQueries.updatePrice(flight.id, newPrice, currency)
+                        }
+                        updated++
+                    } else {
+                        if (!dryRun) {
+                            // Just update the checked timestamp
+                            FlightQueries.updatePriceCheckedAt(flight.id)
+                        }
+                        unchanged++
+                    }
+                }
+                "unavailable" -> {
+                    println("  ❌ ${flight.id.take(8)}: No longer available${result.reason?.let { " ($it)" } ?: ""}")
+                    unavailable++
+                    // Could optionally mark as unavailable or delete
+                }
+                "error" -> {
+                    println("  ⚠ ${flight.id.take(8)}: Error - ${result.reason ?: "unknown"}")
+                    errors++
+                }
+            }
+        }
+
+        println()
+        println("Summary:")
+        println("  Price changes: $updated")
+        println("  Unchanged: $unchanged")
+        println("  Unavailable: $unavailable")
+        println("  Errors: $errors")
+
+        if (dryRun && updated > 0) {
+            println()
+            println("Run without --dry-run to apply changes")
+        }
+
+        return 0
     }
 }
 
