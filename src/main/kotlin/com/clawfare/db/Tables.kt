@@ -20,6 +20,11 @@ object Investigations : Table("investigations") {
     val maxPrice = double("max_price").nullable()
     val departAfter = text("depart_after").nullable()
     val departBefore = text("depart_before").nullable()
+    // Trip constraints
+    val minTripDays = integer("min_trip_days").nullable()
+    val maxTripDays = integer("max_trip_days").nullable()
+    val mustIncludeDate = text("must_include_date").nullable()
+    val maxLayoverMinutes = integer("max_layover_minutes").nullable()
     val createdAt = text("created_at")
     val updatedAt = text("updated_at")
 
@@ -51,6 +56,9 @@ object Flights : Table("flights") {
     val bookingClass = text("booking_class").nullable()
     val cabinMixed = integer("cabin_mixed").default(0)
     val stale = integer("stale").default(0)
+    val aircraftType = text("aircraft_type").nullable()
+    val fareBrand = text("fare_brand").nullable()
+    val disqualified = text("disqualified").nullable()
     val notes = text("notes").nullable()
     val tags = text("tags").nullable()
 

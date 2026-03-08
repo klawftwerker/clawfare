@@ -88,6 +88,9 @@ object Output {
             appendLine("  Route:     ${flight.origin} → ${flight.destination}")
             appendLine("  Type:      ${flight.tripType} / ${flight.ticketStructure}")
             appendLine("  Source:    ${flight.source}")
+            flight.aircraftType?.let { appendLine("  Aircraft:  $it") }
+            flight.fareBrand?.let { appendLine("  Fare:      $it") }
+            flight.disqualified?.let { appendLine("  ❌ Disqualified: $it") }
 
             if (segment != null) {
                 appendLine()

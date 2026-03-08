@@ -31,6 +31,11 @@ data class InvestigationDto(
     val maxPrice: Double? = null,
     val departAfter: String? = null,
     val departBefore: String? = null,
+    // Trip constraints
+    val minTripDays: Int? = null,
+    val maxTripDays: Int? = null,
+    val mustIncludeDate: String? = null,
+    val maxLayoverMinutes: Int? = null,
     val createdAt: String = Instant.now().toString(),
     val updatedAt: String = Instant.now().toString(),
 )
@@ -55,6 +60,9 @@ data class FlightDto(
     val bookingClass: String? = null,
     val cabinMixed: Boolean = false,
     val stale: Boolean = false,
+    val aircraftType: String? = null,
+    val fareBrand: String? = null,
+    val disqualified: String? = null,
     val notes: String? = null,
     val tags: String? = null,
     val capturedAt: String = Instant.now().toString(),
@@ -101,6 +109,10 @@ object InvestigationQueries {
                 it[maxPrice] = dto.maxPrice
                 it[departAfter] = dto.departAfter
                 it[departBefore] = dto.departBefore
+                it[minTripDays] = dto.minTripDays
+                it[maxTripDays] = dto.maxTripDays
+                it[mustIncludeDate] = dto.mustIncludeDate
+                it[maxLayoverMinutes] = dto.maxLayoverMinutes
                 it[createdAt] = dto.createdAt
                 it[updatedAt] = dto.updatedAt
             }
@@ -151,6 +163,10 @@ object InvestigationQueries {
                     it[maxPrice] = dto.maxPrice
                     it[departAfter] = dto.departAfter
                     it[departBefore] = dto.departBefore
+                    it[minTripDays] = dto.minTripDays
+                    it[maxTripDays] = dto.maxTripDays
+                    it[mustIncludeDate] = dto.mustIncludeDate
+                    it[maxLayoverMinutes] = dto.maxLayoverMinutes
                     it[updatedAt] = Instant.now().toString()
                 }
             if (updated > 0) getBySlug(dto.slug) else null
@@ -164,6 +180,10 @@ object InvestigationQueries {
         maxPrice: Double? = null,
         departAfter: String? = null,
         departBefore: String? = null,
+        minTripDays: Int? = null,
+        maxTripDays: Int? = null,
+        mustIncludeDate: String? = null,
+        maxLayoverMinutes: Int? = null,
     ): Boolean =
         transaction {
             val updates =
@@ -171,6 +191,10 @@ object InvestigationQueries {
                     maxPrice?.let { value -> it[Investigations.maxPrice] = value }
                     departAfter?.let { value -> it[Investigations.departAfter] = value }
                     departBefore?.let { value -> it[Investigations.departBefore] = value }
+                    minTripDays?.let { value -> it[Investigations.minTripDays] = value }
+                    maxTripDays?.let { value -> it[Investigations.maxTripDays] = value }
+                    mustIncludeDate?.let { value -> it[Investigations.mustIncludeDate] = value }
+                    maxLayoverMinutes?.let { value -> it[Investigations.maxLayoverMinutes] = value }
                     it[updatedAt] = Instant.now().toString()
                 }
             updates > 0
@@ -201,6 +225,10 @@ object InvestigationQueries {
             maxPrice = this[Investigations.maxPrice],
             departAfter = this[Investigations.departAfter],
             departBefore = this[Investigations.departBefore],
+            minTripDays = this[Investigations.minTripDays],
+            maxTripDays = this[Investigations.maxTripDays],
+            mustIncludeDate = this[Investigations.mustIncludeDate],
+            maxLayoverMinutes = this[Investigations.maxLayoverMinutes],
             createdAt = this[Investigations.createdAt],
             updatedAt = this[Investigations.updatedAt],
         )
@@ -238,6 +266,9 @@ object FlightQueries {
                 it[bookingClass] = dto.bookingClass
                 it[cabinMixed] = if (dto.cabinMixed) 1 else 0
                 it[stale] = if (dto.stale) 1 else 0
+                it[aircraftType] = dto.aircraftType
+                it[fareBrand] = dto.fareBrand
+                it[disqualified] = dto.disqualified
                 it[notes] = dto.notes
                 it[tags] = dto.tags
                 it[capturedAt] = dto.capturedAt
@@ -336,6 +367,9 @@ object FlightQueries {
                     it[bookingClass] = dto.bookingClass
                     it[cabinMixed] = if (dto.cabinMixed) 1 else 0
                     it[stale] = if (dto.stale) 1 else 0
+                    it[aircraftType] = dto.aircraftType
+                    it[fareBrand] = dto.fareBrand
+                    it[disqualified] = dto.disqualified
                     it[notes] = dto.notes
                     it[tags] = dto.tags
                     it[priceCheckedAt] = Instant.now().toString()
@@ -443,6 +477,9 @@ object FlightQueries {
             bookingClass = this[Flights.bookingClass],
             cabinMixed = this[Flights.cabinMixed] == 1,
             stale = this[Flights.stale] == 1,
+            aircraftType = this[Flights.aircraftType],
+            fareBrand = this[Flights.fareBrand],
+            disqualified = this[Flights.disqualified],
             notes = this[Flights.notes],
             tags = this[Flights.tags],
             capturedAt = this[Flights.capturedAt],

@@ -369,6 +369,18 @@ class InvConfigCommand : Callable<Int> {
     @Option(names = ["--depart-before"], description = ["Maximum departure time (HH:MM)"])
     var departBefore: String? = null
 
+    @Option(names = ["--min-days"], description = ["Minimum trip duration in days"])
+    var minTripDays: Int? = null
+
+    @Option(names = ["--max-days"], description = ["Maximum trip duration in days"])
+    var maxTripDays: Int? = null
+
+    @Option(names = ["--must-include"], description = ["Date that must be included (YYYY-MM-DD)"])
+    var mustIncludeDate: String? = null
+
+    @Option(names = ["--max-layover"], description = ["Maximum layover in minutes"])
+    var maxLayoverMinutes: Int? = null
+
     @Option(names = ["--show"], description = ["Show current config"])
     var showConfig: Boolean = false
 
@@ -386,6 +398,9 @@ class InvConfigCommand : Callable<Int> {
             println("  Max price: ${investigation.maxPrice ?: "not set"}")
             println("  Depart after: ${investigation.departAfter ?: "any"}")
             println("  Depart before: ${investigation.departBefore ?: "any"}")
+            println("  Trip days: ${investigation.minTripDays ?: "?"}-${investigation.maxTripDays ?: "?"}")
+            println("  Must include: ${investigation.mustIncludeDate ?: "not set"}")
+            println("  Max layover: ${investigation.maxLayoverMinutes?.let { "${it}m" } ?: "not set"}")
             return 0
         }
 
@@ -396,6 +411,10 @@ class InvConfigCommand : Callable<Int> {
                 maxPrice = maxPrice,
                 departAfter = departAfter,
                 departBefore = departBefore,
+                minTripDays = minTripDays,
+                maxTripDays = maxTripDays,
+                mustIncludeDate = mustIncludeDate,
+                maxLayoverMinutes = maxLayoverMinutes,
             )
 
         if (updated) {
@@ -492,6 +511,15 @@ class FlightAddCommand : Callable<Int> {
     @Option(names = ["--cabin"], description = ["Cabin class (economy, premium_economy, business, first)"])
     var bookingClass: String? = null
 
+    @Option(names = ["--aircraft"], description = ["Aircraft type (e.g., 777-300, A350)"])
+    var aircraftType: String? = null
+
+    @Option(names = ["--fare"], description = ["Fare brand (e.g., Business Light, Business Saver)"])
+    var fareBrand: String? = null
+
+    @Option(names = ["--disqualified"], description = ["Disqualification reason (e.g., overnight layover)"])
+    var disqualified: String? = null
+
     override fun call(): Int {
         parent.parent.ensureDb()
 
@@ -554,6 +582,9 @@ class FlightAddCommand : Callable<Int> {
                 outboundJson = outboundJson,
                 returnJson = returnJson,
                 bookingClass = bookingClass,
+                aircraftType = aircraftType,
+                fareBrand = fareBrand,
+                disqualified = disqualified,
                 notes = notes,
                 tags = tagsJson,
                 capturedAt = now,
