@@ -788,6 +788,9 @@ class FlightListCommand : Callable<Int> {
     @Option(names = ["--prices"], description = ["Show price history summary (min/max/change)"])
     var showPrices: Boolean = false
 
+    @Option(names = ["--history"], description = ["Show full price history per flight"])
+    var showHistory: Boolean = false
+
     override fun call(): Int {
         parent.parent.ensureDb()
 
@@ -865,6 +868,44 @@ class FlightListCommand : Callable<Int> {
                 f.priceAmount > first
             }
             println("${flights.size} flights │ ${allHistory.size} price observations │ $pricesDown↓ down │ $pricesUp↑ up │ ${flights.size - pricesDown - pricesUp} unchanged")
+        } else if (showHistory) {
+            // Show full price history per flight
+            flights.forEach { f ->
+                val history = PriceHistoryQueries.getByFlightId(f.id)
+                val outbound = Output.parseSegment(f.outboundJson)
+                val airline = outbound?.legs?.firstOrNull()?.airline ?: "?"
+                val departDate = outbound?.departTime?.take(10) ?: "?"
+                
+                println()
+                println("${f.id.take(8)} │ $airline │ ${f.origin}→${f.destination} │ $departDate")
+                println("─".repeat(70))
+                
+                if (history.isEmpty()) {
+                    println("  No price history")
+                } else {
+                    var prevPrice: Double? = null
+                    history.sortedBy { it.checkedAt }.forEach { price ->
+                        val change = if (prevPrice != null) {
+                            val diff = price.amount - prevPrice!!
+                            when {
+                                diff > 0 -> "↑ +${Output.formatPrice(diff, price.currency)}"
+                                diff < 0 -> "↓ ${Output.formatPrice(diff, price.currency)}"
+                                else -> "—"
+                            }
+                        } else "—"
+                        
+                        val timestamp = price.checkedAt.take(16).replace("T", " ")
+                        val sourceTag = if (price.source != "kraftwerker") " [${price.source}]" else ""
+                        println("  $timestamp │ ${Output.formatPrice(price.amount, price.currency).padStart(9)} │ $change$sourceTag")
+                        prevPrice = price.amount
+                    }
+                }
+            }
+            
+            // Summary
+            println()
+            val allHistory = flights.flatMap { PriceHistoryQueries.getByFlightId(it.id) }
+            println("${flights.size} flights │ ${allHistory.size} total price observations")
         } else {
             println(Output.formatFlightWithPriceTable(flights))
         }
