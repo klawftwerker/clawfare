@@ -587,6 +587,7 @@ class InvUrlsCommand : Callable<Int> {
         FlightValidateCommand::class,
         FlightImportCommand::class,
         FlightMatchCommand::class,
+        FlightDedupeCommand::class,
     ],
 )
 class FlightCommand : Callable<Int> {
@@ -1643,6 +1644,163 @@ class FlightMatchCommand : Callable<Int> {
         }
 
         return 0
+    }
+}
+
+/**
+ * Deduplicate flights by routing signature.
+ * Keeps the cheapest flight for each unique routing.
+ */
+@Command(
+    name = "dedupe",
+    description = ["Remove duplicate flights, keeping cheapest per routing"],
+)
+class FlightDedupeCommand : Callable<Int> {
+    @ParentCommand
+    lateinit var parent: FlightCommand
+
+    @Parameters(index = "0", description = ["Investigation slug"])
+    lateinit var slug: String
+
+    @Option(names = ["--dry-run"], description = ["Show what would be deleted without making changes"])
+    var dryRun: Boolean = false
+
+    @Option(names = ["--keep-valid"], description = ["Keep flights with valid times even if more expensive"])
+    var keepValid: Boolean = true
+
+    override fun call(): Int {
+        parent.parent.ensureDb()
+
+        val flights = FlightQueries.listByInvestigation(slug)
+        if (flights.isEmpty()) {
+            println("No flights to dedupe")
+            return 0
+        }
+
+        println("Analyzing ${flights.size} flights...")
+
+        // Group by signature
+        val grouped = flights.groupBy { computeSignature(it) }
+        
+        var toDelete = mutableListOf<FlightDto>()
+        var toKeep = mutableListOf<FlightDto>()
+
+        grouped.forEach { (signature, group) ->
+            if (group.size == 1) {
+                toKeep.add(group.first())
+                return@forEach
+            }
+
+            // Multiple flights with same signature - pick the best
+            val best = pickBest(group, keepValid)
+            toKeep.add(best)
+            toDelete.addAll(group.filter { it.id != best.id })
+        }
+
+        // Also mark invalid flights (0 duration) for deletion
+        val invalid = flights.filter { isInvalid(it) }
+        val invalidNotAlreadyMarked = invalid.filter { inv -> toDelete.none { it.id == inv.id } }
+        toDelete.addAll(invalidNotAlreadyMarked)
+        toKeep.removeAll { k -> invalid.any { it.id == k.id } }
+
+        println()
+        println("Summary:")
+        println("  Unique routings: ${grouped.size}")
+        println("  Flights to keep: ${toKeep.size}")
+        println("  Duplicates to remove: ${toDelete.size - invalidNotAlreadyMarked.size}")
+        println("  Invalid to remove: ${invalidNotAlreadyMarked.size}")
+        println()
+
+        if (toDelete.isEmpty()) {
+            println("Nothing to clean up!")
+            return 0
+        }
+
+        if (dryRun) {
+            println("Would delete:")
+            toDelete.take(20).forEach { f ->
+                val outbound = Output.parseSegment(f.outboundJson)
+                val airline = outbound?.legs?.firstOrNull()?.airline ?: "?"
+                val reason = if (isInvalid(f)) "[INVALID]" else "[DUPE]"
+                println("  $reason ${f.id.take(8)} ${Output.formatPrice(f.priceAmount, f.priceCurrency)} $airline")
+            }
+            if (toDelete.size > 20) {
+                println("  ... and ${toDelete.size - 20} more")
+            }
+        } else {
+            println("Deleting ${toDelete.size} flights...")
+            var deleted = 0
+            toDelete.forEach { f ->
+                if (FlightQueries.delete(f.id)) {
+                    deleted++
+                }
+            }
+            Output.success("Deleted $deleted flights")
+        }
+
+        return 0
+    }
+
+    /**
+     * Compute a signature for grouping duplicate flights.
+     * Format: {date}|{airline}|{origin}-{via...}-{dest}[|{return_date}|{airline}|{routing}]
+     */
+    private fun computeSignature(flight: FlightDto): String {
+        val outbound = Output.parseSegment(flight.outboundJson)
+        val returnSeg = flight.returnJson?.let { Output.parseSegment(it) }
+
+        val outSig = segmentSignature(outbound, flight.origin, flight.destination)
+        val retSig = returnSeg?.let { segmentSignature(it, flight.destination, flight.origin) }
+
+        return if (retSig != null) "$outSig|$retSig" else outSig
+    }
+
+    private fun segmentSignature(segment: FlightSegment?, fallbackOrigin: String, fallbackDest: String): String {
+        if (segment == null || segment.legs.isEmpty()) {
+            return "?|?|$fallbackOrigin-$fallbackDest"
+        }
+
+        val date = segment.departTime.substring(0, 10)
+        val airline = segment.legs.firstOrNull()?.airlineCode ?: "?"
+        
+        // Build routing
+        val airports = mutableListOf(segment.legs.first().departAirport)
+        segment.legs.forEach { airports.add(it.arriveAirport) }
+        val routing = airports.joinToString("-")
+
+        return "$date|$airline|$routing"
+    }
+
+    /**
+     * Pick the best flight from a group of duplicates.
+     */
+    private fun pickBest(group: List<FlightDto>, preferValid: Boolean): FlightDto {
+        if (preferValid) {
+            // Prefer valid flights (non-zero duration)
+            val valid = group.filter { !isInvalid(it) }
+            if (valid.isNotEmpty()) {
+                // Among valid, pick cheapest
+                return valid.minByOrNull { it.priceAmount }!!
+            }
+        }
+        // Fall back to cheapest overall
+        return group.minByOrNull { it.priceAmount }!!
+    }
+
+    /**
+     * Check if a flight has invalid/placeholder data.
+     */
+    private fun isInvalid(flight: FlightDto): Boolean {
+        val outbound = Output.parseSegment(flight.outboundJson) ?: return true
+        
+        // Check for zero duration (placeholder data)
+        if (outbound.durationMinutes == 0) return true
+        
+        // Check for all-zero leg times
+        val firstLeg = outbound.legs.firstOrNull() ?: return true
+        if (firstLeg.durationMinutes == 0) return true
+        
+        return false
     }
 }
 
