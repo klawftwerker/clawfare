@@ -28,6 +28,7 @@ import java.util.concurrent.Callable
 @Command(
     name = "inv",
     description = ["Manage flight investigations"],
+    mixinStandardHelpOptions = true,
     subcommands = [
         InvNewCommand::class,
         InvListCommand::class,
@@ -417,6 +418,7 @@ class InvConfigCommand : Callable<Int> {
 @Command(
     name = "flight",
     description = ["Manage flights"],
+    mixinStandardHelpOptions = true,
     subcommands = [
         FlightAddCommand::class,
         FlightListCommand::class,
