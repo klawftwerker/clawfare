@@ -1,0 +1,17 @@
+#!/bin/bash
+# Pre-commit hook: lint + coverage
+
+echo "Running code checks..."
+
+./gradlew codeCheck --quiet
+
+if [ $? -ne 0 ]; then
+    echo ""
+    echo "❌ Commit blocked: linting or coverage failed"
+    echo ""
+    echo "Fix lint issues:  ./gradlew ktlintFormat"
+    echo "Check coverage:   ./gradlew koverHtmlReport && open build/reports/kover/html/index.html"
+    exit 1
+fi
+
+echo "✓ All checks passed"
