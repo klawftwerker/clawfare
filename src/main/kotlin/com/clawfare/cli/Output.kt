@@ -141,21 +141,37 @@ object Output {
             return "No flights found."
         }
 
-        val headers = listOf("ID", "Price", "Route", "Type", "Tags", "Captured")
+        val headers = listOf("ID", "Price", "Cabin", "Airline", "Route", "Stops", "Depart", "Type")
         val rows =
             flights.map { flight ->
+                val segment = parseSegment(flight.outboundJson)
+                val airline = segment?.legs?.firstOrNull()?.airlineCode ?: "?"
+                val stops = segment?.stops?.toString() ?: "?"
+                val departDate = segment?.departTime?.substring(0, 10) ?: "?"
                 listOf(
-                    flight.id,
+                    flight.id.take(8),
                     formatPrice(flight.priceAmount, flight.priceCurrency),
+                    flight.bookingClass ?: "?",
+                    airline,
                     "${flight.origin}→${flight.destination}",
-                    flight.tripType.replace("_", " "),
-                    flight.tags?.let { parseTags(it).joinToString(",") } ?: "",
-                    flight.capturedAt.substring(0, 10),
+                    stops,
+                    departDate,
+                    if (flight.tripType == "round_trip") "RT" else "OW",
                 )
             }
 
         return formatTable(headers, rows)
     }
+
+    /**
+     * Parse a FlightSegment from JSON.
+     */
+    fun parseSegment(json: String): FlightSegment? =
+        try {
+            compactJson.decodeFromString<FlightSegment>(json)
+        } catch (_: Exception) {
+            null
+        }
 
     /**
      * Format price history as a table.
