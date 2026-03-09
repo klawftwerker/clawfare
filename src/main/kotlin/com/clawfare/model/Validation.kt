@@ -647,18 +647,31 @@ object FlightValidator {
         val violations = mutableListOf<ConstraintViolation>()
 
         // 1. Airline allowlist check (all legs in both segments)
+        // Per-investigation overrides
+        val excluded = investigation.excludedAirlines?.split(",")?.map { it.trim().uppercase() }?.filter { it.isNotBlank() }?.toSet() ?: emptySet()
+        val included = investigation.includedAirlines?.split(",")?.map { it.trim().uppercase() }?.filter { it.isNotBlank() }?.toSet() ?: emptySet()
+
         val allLegs = outbound.legs + (returnSegment?.legs ?: emptyList())
         for (leg in allLegs) {
             val code = leg.airlineCode
             if (code.isBlank()) continue // Can't validate without a code
-            if (code in blockedAirlines) {
+
+            // Per-investigation exclusion takes priority
+            if (code in excluded) {
+                violations.add(
+                    ConstraintViolation(
+                        "EXCLUDED_AIRLINE",
+                        "${leg.airline} (${code}) is excluded for this investigation",
+                    ),
+                )
+            } else if (code in blockedAirlines && code !in included) {
                 violations.add(
                     ConstraintViolation(
                         "BLOCKED_AIRLINE",
                         "${leg.airline} (${leg.airlineCode}) is a blocked airline",
                     ),
                 )
-            } else if (code !in allowedAirlines) {
+            } else if (code !in allowedAirlines && code !in included) {
                 violations.add(
                     ConstraintViolation(
                         "UNAPPROVED_AIRLINE",

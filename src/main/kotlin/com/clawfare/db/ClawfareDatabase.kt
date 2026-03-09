@@ -160,6 +160,12 @@ object ClawfareDatabase {
             if (!invCols.contains("depart_before")) {
                 stmt.executeUpdate("ALTER TABLE investigations ADD COLUMN depart_before TEXT")
             }
+            if (!invCols.contains("excluded_airlines")) {
+                stmt.executeUpdate("ALTER TABLE investigations ADD COLUMN excluded_airlines TEXT")
+            }
+            if (!invCols.contains("included_airlines")) {
+                stmt.executeUpdate("ALTER TABLE investigations ADD COLUMN included_airlines TEXT")
+            }
 
             stmt.close()
         }

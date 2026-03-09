@@ -385,6 +385,18 @@ class InvConfigCommand : Callable<Int> {
     @Option(names = ["--max-layover"], description = ["Maximum layover in minutes"])
     var maxLayoverMinutes: Int? = null
 
+    @Option(names = ["--exclude-airline"], description = ["Add airline code to exclusion list (e.g. LO)"])
+    var excludeAirline: String? = null
+
+    @Option(names = ["--include-airline"], description = ["Add airline code to inclusion list (e.g. TK)"])
+    var includeAirline: String? = null
+
+    @Option(names = ["--remove-exclude"], description = ["Remove airline code from exclusion list"])
+    var removeExclude: String? = null
+
+    @Option(names = ["--remove-include"], description = ["Remove airline code from inclusion list"])
+    var removeInclude: String? = null
+
     @Option(names = ["--show"], description = ["Show current config"])
     var showConfig: Boolean = false
 
@@ -404,8 +416,43 @@ class InvConfigCommand : Callable<Int> {
             println("  Depart before: ${investigation.departBefore ?: "any"}")
             println("  Trip days: ${investigation.minTripDays ?: "?"}-${investigation.maxTripDays ?: "?"}")
             println("  Must include: ${investigation.mustIncludeDate ?: "not set"}")
-            println("  Max layover: ${investigation.maxLayoverMinutes?.let { "${it}m" } ?: "not set"}")
+            println("  Max layover: ${investigation.maxLayoverMinutes?.let { "${it}m (${it/60}h ${it%60}m)" } ?: "not set"}")
+            println("  Excluded airlines: ${investigation.excludedAirlines ?: "none"}")
+            println("  Included airlines: ${investigation.includedAirlines ?: "none"}")
             return 0
+        }
+
+        // Process airline list modifications
+        var newExcluded = investigation.excludedAirlines
+        var newIncluded = investigation.includedAirlines
+
+        if (excludeAirline != null) {
+            val code = excludeAirline!!.uppercase()
+            val current = newExcluded?.split(",")?.map { it.trim() }?.filter { it.isNotBlank() }?.toMutableSet() ?: mutableSetOf()
+            current.add(code)
+            newExcluded = current.sorted().joinToString(",")
+            println("  Added $code to exclusion list")
+        }
+        if (removeExclude != null) {
+            val code = removeExclude!!.uppercase()
+            val current = newExcluded?.split(",")?.map { it.trim() }?.filter { it.isNotBlank() }?.toMutableSet() ?: mutableSetOf()
+            current.remove(code)
+            newExcluded = if (current.isEmpty()) null else current.sorted().joinToString(",")
+            println("  Removed $code from exclusion list")
+        }
+        if (includeAirline != null) {
+            val code = includeAirline!!.uppercase()
+            val current = newIncluded?.split(",")?.map { it.trim() }?.filter { it.isNotBlank() }?.toMutableSet() ?: mutableSetOf()
+            current.add(code)
+            newIncluded = current.sorted().joinToString(",")
+            println("  Added $code to inclusion list")
+        }
+        if (removeInclude != null) {
+            val code = removeInclude!!.uppercase()
+            val current = newIncluded?.split(",")?.map { it.trim() }?.filter { it.isNotBlank() }?.toMutableSet() ?: mutableSetOf()
+            current.remove(code)
+            newIncluded = if (current.isEmpty()) null else current.sorted().joinToString(",")
+            println("  Removed $code from inclusion list")
         }
 
         // Update config
@@ -419,6 +466,8 @@ class InvConfigCommand : Callable<Int> {
                 maxTripDays = maxTripDays,
                 mustIncludeDate = mustIncludeDate,
                 maxLayoverMinutes = maxLayoverMinutes,
+                excludedAirlines = newExcluded,
+                includedAirlines = newIncluded,
             )
 
         if (updated) {

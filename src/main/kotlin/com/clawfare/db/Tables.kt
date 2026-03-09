@@ -25,6 +25,9 @@ object Investigations : Table("investigations") {
     val maxTripDays = integer("max_trip_days").nullable()
     val mustIncludeDate = text("must_include_date").nullable()
     val maxLayoverMinutes = integer("max_layover_minutes").nullable()
+    // Airline overrides
+    val excludedAirlines = text("excluded_airlines").nullable()
+    val includedAirlines = text("included_airlines").nullable()
     val createdAt = text("created_at")
     val updatedAt = text("updated_at")
 

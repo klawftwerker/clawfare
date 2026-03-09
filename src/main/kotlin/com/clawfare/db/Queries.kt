@@ -36,6 +36,9 @@ data class InvestigationDto(
     val maxTripDays: Int? = null,
     val mustIncludeDate: String? = null,
     val maxLayoverMinutes: Int? = null,
+    // Airline overrides (comma-separated IATA codes)
+    val excludedAirlines: String? = null,  // e.g. "LO,CX" — block these even if globally allowed
+    val includedAirlines: String? = null,  // e.g. "TK" — allow these even if not globally allowed
     val createdAt: String = Instant.now().toString(),
     val updatedAt: String = Instant.now().toString(),
 )
@@ -151,6 +154,8 @@ object InvestigationQueries {
                 it[maxTripDays] = dto.maxTripDays
                 it[mustIncludeDate] = dto.mustIncludeDate
                 it[maxLayoverMinutes] = dto.maxLayoverMinutes
+                it[excludedAirlines] = dto.excludedAirlines
+                it[includedAirlines] = dto.includedAirlines
                 it[createdAt] = dto.createdAt
                 it[updatedAt] = dto.updatedAt
             }
@@ -222,6 +227,8 @@ object InvestigationQueries {
         maxTripDays: Int? = null,
         mustIncludeDate: String? = null,
         maxLayoverMinutes: Int? = null,
+        excludedAirlines: String? = null,
+        includedAirlines: String? = null,
     ): Boolean =
         transaction {
             val updates =
@@ -233,6 +240,9 @@ object InvestigationQueries {
                     maxTripDays?.let { value -> it[Investigations.maxTripDays] = value }
                     mustIncludeDate?.let { value -> it[Investigations.mustIncludeDate] = value }
                     maxLayoverMinutes?.let { value -> it[Investigations.maxLayoverMinutes] = value }
+                    // Airline lists: always write (even null, to allow clearing)
+                    it[Investigations.excludedAirlines] = excludedAirlines
+                    it[Investigations.includedAirlines] = includedAirlines
                     it[updatedAt] = Instant.now().toString()
                 }
             updates > 0
@@ -267,6 +277,8 @@ object InvestigationQueries {
             maxTripDays = this[Investigations.maxTripDays],
             mustIncludeDate = this[Investigations.mustIncludeDate],
             maxLayoverMinutes = this[Investigations.maxLayoverMinutes],
+            excludedAirlines = this[Investigations.excludedAirlines],
+            includedAirlines = this[Investigations.includedAirlines],
             createdAt = this[Investigations.createdAt],
             updatedAt = this[Investigations.updatedAt],
         )
