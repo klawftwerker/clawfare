@@ -249,7 +249,7 @@ object Output {
             return "No flights found."
         }
 
-        val headers = listOf("ID", "Price", "S", "Cabin", "Airline", "Route", "Layover", "Depart", "Type")
+        val headers = listOf("ID", "Price", "S", "Cabin", "Airline", "Route", "Layover", "Depart", "Days", "Type")
         val rows =
             flights.map { flight ->
                 val outbound = parseSegment(flight.outboundJson)
@@ -259,6 +259,13 @@ object Output {
                 val departDate = outbound?.departTime?.substring(0, 10) ?: "?"
                 val typeFlag = if (flight.tripType == "round_trip") "RT" else "OW"
                 val staleFlag = if (flight.flight.stale) "!" else "✓"
+                val days = if (outbound != null && returnSeg != null) {
+                    try {
+                        val d1 = java.time.ZonedDateTime.parse(outbound.departTime)
+                        val d2 = java.time.ZonedDateTime.parse(returnSeg.departTime)
+                        java.time.Duration.between(d1, d2).toDays().toString()
+                    } catch (_: Exception) { "?" }
+                } else "—"
                 listOf(
                     flight.id.take(8),
                     formatPrice(flight.priceAmount, flight.priceCurrency),
@@ -268,6 +275,7 @@ object Output {
                     "${flight.origin}→${flight.destination}",
                     layover,
                     departDate,
+                    days,
                     typeFlag,
                 )
             }
