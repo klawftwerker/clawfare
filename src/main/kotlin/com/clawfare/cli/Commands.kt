@@ -1101,18 +1101,9 @@ class FlightListCommand : Callable<Int> {
                 val outLayovers = Output.formatLayovers(outbound)
                 val retLayovers = returnSeg?.let { Output.formatLayovers(it) }
 
-                // Links — prefer real share links, fall back to generated search URL
+                // Links — show what's stored. Bad links = data needs fixing.
                 val latestHistory = PriceHistoryQueries.getByFlightId(f.id).maxByOrNull { it.checkedAt }
-                val storedLink = (latestHistory?.sourceUrl?.takeIf { it.isNotBlank() } ?: f.flight.shareLink).orEmpty()
-                val isRealLink = storedLink.contains("/flights/s/") || storedLink.contains("/flights/booking") || storedLink.contains("/book/")
-                val link = if (isRealLink) {
-                    storedLink
-                } else {
-                    // Generate a search URL from the flight's actual dates
-                    val depDate = outbound?.departTime?.take(10) ?: departDate
-                    val retDate = returnSeg?.departTime?.take(10)
-                    InvUrlsCommand.buildGoogleFlightsUrl(f.origin, f.destination, investigation.cabinClass, depDate, retDate, investigation.maxStops)
-                }
+                val link = latestHistory?.sourceUrl?.takeIf { it.isNotBlank() } ?: f.flight.shareLink.orEmpty()
 
                 if (index > 0) println()
                 println("${Output.formatPrice(f.priceAmount, f.priceCurrency)} — $airline ($airlineCode)")
@@ -1129,7 +1120,14 @@ class FlightListCommand : Callable<Int> {
                     println("  ✈️  Ret: $retRoute")
                     if (retLayovers != null && retLayovers.isNotBlank()) println("  ⏱  Ret connections: $retLayovers")
                 }
-                println("  🔗 $link")
+                val isShareLink = link.contains("/flights/s/") || link.contains("/flights/booking") || link.contains("/book/flight")
+                if (link.isBlank()) {
+                    println("  ⚠️  No link")
+                } else if (isShareLink) {
+                    println("  🔗 $link")
+                } else {
+                    println("  ⚠️  $link (not a share link)")
+                }
             }
             println()
             println("${flights.size} flights")
