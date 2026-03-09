@@ -584,32 +584,47 @@ class InvUrlsCommand : Callable<Int> {
         return 0
     }
 
-    private fun buildGoogleFlightsUrl(
-        inv: InvestigationDto,
-        departDate: String,
-        returnDate: String?,
-    ): String {
-        val cabin =
-            when (inv.cabinClass.lowercase()) {
-                "economy" -> "economy"
-                "premium_economy" -> "premium+economy"
-                "business" -> "business+class"
-                "first" -> "first+class"
-                else -> inv.cabinClass
-            }
+    companion object {
+        /**
+         * Build a Google Flights search URL for a specific date pair.
+         * Public so --report can use it per-flight.
+         */
+        fun buildGoogleFlightsUrl(
+            inv: InvestigationDto,
+            departDate: String,
+            returnDate: String?,
+        ): String = buildGoogleFlightsUrl(inv.origin, inv.destination, inv.cabinClass, departDate, returnDate, inv.maxStops)
 
-        return buildString {
-            append("https://www.google.com/travel/flights")
-            append("?q=Flights+from+${inv.origin}+to+${inv.destination}")
-            append("+on+$departDate")
-            if (returnDate != null) {
-                append("+returning+$returnDate")
+        fun buildGoogleFlightsUrl(
+            origin: String,
+            destination: String,
+            cabinClass: String,
+            departDate: String,
+            returnDate: String?,
+            maxStops: Int = 1,
+        ): String {
+            val cabin =
+                when (cabinClass.lowercase()) {
+                    "economy" -> "economy"
+                    "premium_economy" -> "premium+economy"
+                    "business" -> "business+class"
+                    "first" -> "first+class"
+                    else -> cabinClass
+                }
+
+            return buildString {
+                append("https://www.google.com/travel/flights")
+                append("?q=Flights+from+$origin+to+$destination")
+                append("+on+$departDate")
+                if (returnDate != null) {
+                    append("+returning+$returnDate")
+                }
+                append("+$cabin")
+                if (maxStops == 0) {
+                    append("+nonstop")
+                }
+                append("&curr=GBP")
             }
-            append("+$cabin")
-            if (inv.maxStops == 0) {
-                append("+nonstop")
-            }
-            append("&curr=GBP")
         }
     }
 }
@@ -1086,9 +1101,18 @@ class FlightListCommand : Callable<Int> {
                 val outLayovers = Output.formatLayovers(outbound)
                 val retLayovers = returnSeg?.let { Output.formatLayovers(it) }
 
-                // Links
+                // Links — prefer real share links, fall back to generated search URL
                 val latestHistory = PriceHistoryQueries.getByFlightId(f.id).maxByOrNull { it.checkedAt }
-                val link = latestHistory?.sourceUrl?.takeIf { it.isNotBlank() } ?: f.flight.shareLink
+                val storedLink = (latestHistory?.sourceUrl?.takeIf { it.isNotBlank() } ?: f.flight.shareLink).orEmpty()
+                val isRealLink = storedLink.contains("/flights/s/") || storedLink.contains("/flights/booking") || storedLink.contains("/book/")
+                val link = if (isRealLink) {
+                    storedLink
+                } else {
+                    // Generate a search URL from the flight's actual dates
+                    val depDate = outbound?.departTime?.take(10) ?: departDate
+                    val retDate = returnSeg?.departTime?.take(10)
+                    InvUrlsCommand.buildGoogleFlightsUrl(f.origin, f.destination, investigation.cabinClass, depDate, retDate, investigation.maxStops)
+                }
 
                 if (index > 0) println()
                 println("${Output.formatPrice(f.priceAmount, f.priceCurrency)} — $airline ($airlineCode)")
