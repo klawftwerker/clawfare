@@ -1102,8 +1102,14 @@ class FlightListCommand : Callable<Int> {
                 val retLayovers = returnSeg?.let { Output.formatLayovers(it) }
 
                 // Links — show what's stored. Bad links = data needs fixing.
-                val latestHistory = PriceHistoryQueries.getByFlightId(f.id).maxByOrNull { it.checkedAt }
-                val link = latestHistory?.sourceUrl?.takeIf { it.isNotBlank() } ?: f.flight.shareLink.orEmpty()
+                // Prefer booking/share links from any price history entry, fall back to latest
+                val allHistory = PriceHistoryQueries.getByFlightId(f.id)
+                val bestLink = allHistory
+                    .map { it.sourceUrl }
+                    .firstOrNull { it.contains("/flights/s/") || it.contains("/flights/booking") || it.contains("/book/flight") }
+                    ?: allHistory.maxByOrNull { it.checkedAt }?.sourceUrl?.takeIf { it.isNotBlank() }
+                    ?: f.flight.shareLink.orEmpty()
+                val link = bestLink
 
                 if (index > 0) println()
                 println("${Output.formatPrice(f.priceAmount, f.priceCurrency)} — $airline ($airlineCode)")
