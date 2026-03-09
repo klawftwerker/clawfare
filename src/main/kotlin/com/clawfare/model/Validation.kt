@@ -1,6 +1,8 @@
 package com.clawfare.model
 
+import com.clawfare.db.InvestigationDto
 import java.security.MessageDigest
+import java.time.Duration
 import java.time.ZonedDateTime
 import java.time.format.DateTimeParseException
 
@@ -54,6 +56,13 @@ object FlightValidator {
             "VS", // Virgin Atlantic
             "TP", // TAP Portugal
             "EI", // Aer Lingus
+            "OS", // Austrian Airlines
+            "LO", // LOT Polish Airlines
+            "SN", // Brussels Airlines
+            "A3", // Aegean Airlines
+            "EN", // Air Dolomiti
+            "LG", // Luxair
+            "BT", // airBaltic
             // Japanese carriers
             "JL", // Japan Airlines
             "NH", // ANA
@@ -614,7 +623,125 @@ object FlightValidator {
 
         throw DateTimeParseException("Cannot parse datetime: $datetime", datetime, 0)
     }
+
+    // ========================================
+    // Investigation constraint enforcement
+    // ========================================
+
+    /**
+     * Violations found when checking a flight against investigation constraints.
+     * Each violation has a short code and human-readable message.
+     */
+    data class ConstraintViolation(val code: String, val message: String)
+
+    /**
+     * Check flight segments against investigation constraints.
+     * Returns empty list if all constraints pass.
+     * Works on parsed FlightSegment data (for both add-time and display-time filtering).
+     */
+    fun checkConstraints(
+        outbound: FlightSegment,
+        returnSegment: FlightSegment?,
+        investigation: InvestigationDto,
+    ): List<ConstraintViolation> {
+        val violations = mutableListOf<ConstraintViolation>()
+
+        // 1. Airline allowlist check (all legs in both segments)
+        val allLegs = outbound.legs + (returnSegment?.legs ?: emptyList())
+        for (leg in allLegs) {
+            val code = leg.airlineCode
+            if (code.isBlank()) continue // Can't validate without a code
+            if (code in blockedAirlines) {
+                violations.add(
+                    ConstraintViolation(
+                        "BLOCKED_AIRLINE",
+                        "${leg.airline} (${leg.airlineCode}) is a blocked airline",
+                    ),
+                )
+            } else if (code !in allowedAirlines) {
+                violations.add(
+                    ConstraintViolation(
+                        "UNAPPROVED_AIRLINE",
+                        "${leg.airline} (${leg.airlineCode}) is not in the approved airline list",
+                    ),
+                )
+            }
+        }
+
+        // 2. Max layover check (time between consecutive legs within a segment)
+        val maxLayover = investigation.maxLayoverMinutes
+        if (maxLayover != null) {
+            checkSegmentLayovers(outbound, "outbound", maxLayover, violations)
+            returnSegment?.let { checkSegmentLayovers(it, "return", maxLayover, violations) }
+        }
+
+        // 3. Trip duration check (days between outbound departure and return departure)
+        if (returnSegment != null) {
+            try {
+                val outDepart = ZonedDateTime.parse(outbound.departTime)
+                val retDepart = ZonedDateTime.parse(returnSegment.departTime)
+                val tripDays = Duration.between(outDepart, retDepart).toDays().toInt()
+
+                val minDays = investigation.minTripDays
+                if (minDays != null && tripDays < minDays) {
+                    violations.add(
+                        ConstraintViolation(
+                            "TRIP_TOO_SHORT",
+                            "Trip is $tripDays days (minimum: $minDays)",
+                        ),
+                    )
+                }
+
+                val maxDays = investigation.maxTripDays
+                if (maxDays != null && tripDays > maxDays) {
+                    violations.add(
+                        ConstraintViolation(
+                            "TRIP_TOO_LONG",
+                            "Trip is $tripDays days (maximum: $maxDays)",
+                        ),
+                    )
+                }
+            } catch (_: DateTimeParseException) {
+                // Can't parse dates — skip duration check
+            }
+        }
+
+        return violations
+    }
+
+    /**
+     * Check layover times between consecutive legs in a segment.
+     */
+    private fun checkSegmentLayovers(
+        segment: FlightSegment,
+        segmentName: String,
+        maxMinutes: Int,
+        violations: MutableList<ConstraintViolation>,
+    ) {
+        val legs = segment.legs
+        for (i in 0 until legs.size - 1) {
+            try {
+                val arriveTime = ZonedDateTime.parse(legs[i].arriveTime)
+                val departTime = ZonedDateTime.parse(legs[i + 1].departTime)
+                val layoverMinutes = Duration.between(arriveTime, departTime).toMinutes()
+
+                if (layoverMinutes > maxMinutes) {
+                    val hours = layoverMinutes / 60
+                    val mins = layoverMinutes % 60
+                    violations.add(
+                        ConstraintViolation(
+                            "LAYOVER_TOO_LONG",
+                            "$segmentName layover at ${legs[i].arriveAirport}: ${hours}h ${mins}m (max: ${maxMinutes / 60}h ${maxMinutes % 60}m)",
+                        ),
+                    )
+                }
+            } catch (_: DateTimeParseException) {
+                // Can't parse times — skip this layover check
+            }
+        }
+    }
 }
+
 
 /**
  * Investigation validator.
@@ -672,5 +799,5 @@ object InvestigationValidator {
         return ValidationErrors(errors)
     }
 
-    private fun isValidDate(date: String): Boolean = date.matches(Regex("^\\d{4}-\\d{2}-\\d{2}$"))
+    private fun isValidDate(date: String): Boolean = date.matches(Regex("""^\d{4}-\d{2}-\d{2}$"""))
 }

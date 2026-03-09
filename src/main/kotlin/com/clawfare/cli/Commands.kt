@@ -749,6 +749,15 @@ class FlightAddCommand : Callable<Int> {
             return 1
         }
 
+        // Enforce investigation constraints (airline, layover, trip duration)
+        val investigation = InvestigationQueries.getBySlug(investigationSlug)!!
+        val violations = FlightValidator.checkConstraints(outbound, returnSegment, investigation)
+        if (violations.isNotEmpty()) {
+            Output.error("Flight violates investigation constraints:")
+            violations.forEach { v -> println("  ✗ [${v.code}] ${v.message}") }
+            return 1
+        }
+
         val id = FlightValidator.generateId(shareLink)
         val now = Instant.now().toString()
 
@@ -843,16 +852,36 @@ class FlightListCommand : Callable<Int> {
     @Option(names = ["--history"], description = ["Show full price history per flight"])
     var showHistory: Boolean = false
 
+    @Option(names = ["--all"], description = ["Show all flights including those violating constraints"])
+    var showAll: Boolean = false
+
     override fun call(): Int {
         parent.parent.ensureDb()
 
         // Verify investigation exists
-        if (InvestigationQueries.getBySlug(investigationSlug) == null) {
+        val investigation = InvestigationQueries.getBySlug(investigationSlug)
+        if (investigation == null) {
             Output.error("Investigation '$investigationSlug' not found")
             return 1
         }
 
         var flights = FlightQueries.listWithPrices(investigationSlug)
+
+        // Apply constraint filtering (default: hide violations)
+        var hiddenCount = 0
+        if (!showAll) {
+            val (passing, violating) = flights.partition { fwp ->
+                try {
+                    val outbound: FlightSegment = Json.decodeFromString(fwp.flight.outboundJson)
+                    val returnSeg: FlightSegment? = fwp.flight.returnJson?.let { Json.decodeFromString(it) }
+                    FlightValidator.checkConstraints(outbound, returnSeg, investigation).isEmpty()
+                } catch (_: Exception) {
+                    true // can't parse → don't filter out
+                }
+            }
+            hiddenCount = violating.size
+            flights = passing
+        }
 
         // Apply filters
         if (tagFilter != null) {
@@ -970,6 +999,11 @@ class FlightListCommand : Callable<Int> {
             println("${flights.size} flights │ ${allHistory.size} total price observations")
         } else {
             println(Output.formatFlightWithPriceTable(flights))
+        }
+
+        if (hiddenCount > 0) {
+            println()
+            println("⚠ $hiddenCount flights hidden (constraint violations). Use --all to show them.")
         }
 
         return 0
@@ -2168,6 +2202,12 @@ class FlightValidateCommand : Callable<Int> {
     override fun call(): Int {
         parent.parent.ensureDb()
 
+        val investigation = InvestigationQueries.getBySlug(slug)
+        if (investigation == null) {
+            Output.error("Investigation '$slug' not found")
+            return 1
+        }
+
         val flights = FlightQueries.listByInvestigation(slug)
         if (flights.isEmpty()) {
             println("No flights to validate")
@@ -2206,19 +2246,11 @@ class FlightValidateCommand : Callable<Int> {
             val returnSeg = f.returnJson?.let { try { Json.decodeFromString<FlightSegment>(it) } catch (e: Exception) { null } }
 
             if (outbound != null) {
-                // Check airline allowlist
-                outbound.legs.forEach { leg ->
-                    if (!FlightValidator.isAirlineAllowed(leg.airlineCode)) {
-                        Output.warn("[${f.id}] Blocked airline: ${leg.airlineCode} ${leg.airline}")
-                        warnings++
-                    }
-                }
-            }
-
-            if (returnSeg != null) {
-                returnSeg.legs.forEach { leg ->
-                    if (!FlightValidator.isAirlineAllowed(leg.airlineCode)) {
-                        Output.warn("[${f.id}] Blocked airline: ${leg.airlineCode} ${leg.airline}")
+                // Full constraint check (airline, layover, trip duration)
+                val violations = FlightValidator.checkConstraints(outbound, returnSeg, investigation)
+                if (violations.isNotEmpty()) {
+                    violations.forEach { v ->
+                        Output.warn("[${f.id}] ${v.code}: ${v.message}")
                         warnings++
                     }
                 }
@@ -2536,6 +2568,14 @@ class FlightImportCommand : Callable<Int> {
                     )
                 )
             )
+        }
+
+        // Check constraints before adding
+        val violations = FlightValidator.checkConstraints(outboundSegment, returnSegment, inv)
+        if (violations.isNotEmpty()) {
+            println("  Rejected (constraint violation): ${imported.airline} ${imported.origin}→${imported.destination}")
+            violations.forEach { v -> println("    ✗ [${v.code}] ${v.message}") }
+            return false
         }
 
         val dto = FlightDto(
