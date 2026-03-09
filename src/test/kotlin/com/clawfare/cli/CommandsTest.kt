@@ -274,7 +274,12 @@ class CommandsTest {
         // Verify in database
         val flights = FlightQueries.listByInvestigation("tokyo-may-2026")
         assertEquals(1, flights.size)
-        assertEquals(2847.0, flights[0].priceAmount)
+        
+        // Price is canonical in price_history, not on flight
+        val history = PriceHistoryQueries.getByFlightId(flights[0].id)
+        assertEquals(1, history.size)
+        assertEquals(2847.0, history[0].amount)
+        assertEquals("https://example.com/flight", history[0].sourceUrl)
     }
 
     @Test
@@ -775,9 +780,15 @@ class FlightImportTest {
         // Verify flight was created
         val flights = FlightQueries.listByInvestigation("tokyo-may-2026")
         assertEquals(1, flights.size)
-        assertEquals(4347.0, flights[0].priceAmount)
-        assertEquals("GBP", flights[0].priceCurrency)
         assertEquals("LHR", flights[0].origin)
+        assertEquals("NRT", flights[0].destination)
+
+        // Price is canonical in price_history
+        val history = PriceHistoryQueries.getByFlightId(flights[0].id)
+        assertEquals(1, history.size)
+        assertEquals(4347.0, history[0].amount)
+        assertEquals("GBP", history[0].currency)
+        assertEquals("https://www.kayak.co.uk/book/flight/KE907-2026-05-14/details", history[0].sourceUrl)
         assertEquals("NRT", flights[0].destination)
     }
 
@@ -1189,8 +1200,12 @@ class FlightMatchingTest {
         val flights = FlightQueries.listByInvestigation("tokyo")
         assertEquals(1, flights.size)
         assertEquals("round_trip", flights[0].tripType)
-        assertEquals(4347.0, flights[0].priceAmount)
         assertNotNull(flights[0].returnJson)
+
+        // Price is canonical in price_history
+        val history = PriceHistoryQueries.getByFlightId(flights[0].id)
+        assertEquals(1, history.size)
+        assertEquals(4347.0, history[0].amount)
     }
 
     @Test
@@ -1294,4 +1309,377 @@ class UrlValidationTest {
     }
 
     private fun createInv(slug: String) = InvestigationQueries.create(InvestigationDto(slug = slug, origin = "LHR", destination = "NRT", departStart = "2026-05-01", departEnd = "2026-05-15", returnStart = "2026-05-15", returnEnd = "2026-05-30", cabinClass = "business", maxStops = 1, createdAt = Instant.now().toString(), updatedAt = Instant.now().toString()))
+}
+
+/**
+ * Tests for auto-migration system.
+ * Verifies that old databases are upgraded safely.
+ */
+class MigrationTest {
+    @org.junit.jupiter.api.io.TempDir
+    lateinit var tempDir: java.nio.file.Path
+
+    @Test
+    fun `migration adds source_url to price_history`() {
+        val dbPath = tempDir.resolve("old.db").toString()
+
+        // Create old-schema DB manually
+        val conn = java.sql.DriverManager.getConnection("jdbc:sqlite:$dbPath")
+        conn.createStatement().executeUpdate("""
+            CREATE TABLE investigations (
+                slug TEXT PRIMARY KEY, origin TEXT, destination TEXT,
+                depart_start TEXT, depart_end TEXT, return_start TEXT, return_end TEXT,
+                cabin_class TEXT, max_stops INTEGER, max_price REAL, depart_after TEXT,
+                depart_before TEXT, min_trip_days INTEGER, max_trip_days INTEGER,
+                must_include_date TEXT, max_layover_minutes INTEGER,
+                created_at TEXT, updated_at TEXT
+            )
+        """.trimIndent())
+        conn.createStatement().executeUpdate("""
+            CREATE TABLE flights (
+                id TEXT PRIMARY KEY, investigation_slug TEXT, share_link TEXT UNIQUE,
+                source TEXT, trip_type TEXT, ticket_structure TEXT,
+                price_amount REAL, price_currency TEXT, price_market TEXT, price_checked_at TEXT,
+                origin TEXT, destination TEXT, outbound_json TEXT, return_json TEXT,
+                booking_class TEXT, cabin_mixed INTEGER DEFAULT 0, stale INTEGER DEFAULT 0,
+                aircraft_type TEXT, fare_brand TEXT, disqualified TEXT, notes TEXT, tags TEXT,
+                captured_at TEXT
+            )
+        """.trimIndent())
+        // Old schema: no source_url column
+        conn.createStatement().executeUpdate("""
+            CREATE TABLE price_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, flight_id TEXT,
+                amount REAL, currency TEXT, checked_at TEXT,
+                source TEXT DEFAULT 'manual', price_market TEXT DEFAULT 'UK'
+            )
+        """.trimIndent())
+        // Insert test data
+        conn.createStatement().executeUpdate("""
+            INSERT INTO investigations VALUES ('test-inv', 'LHR', 'NRT', '2026-05-01', '2026-05-15', '2026-05-15', '2026-05-30', 'business', 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '2026-01-01', '2026-01-01')
+        """.trimIndent())
+        conn.createStatement().executeUpdate("""
+            INSERT INTO flights VALUES ('flight1', 'test-inv', 'https://example.com/flight1', 'google', 'round_trip', 'single', 2500.0, 'GBP', 'UK', '2026-01-01', 'LHR', 'NRT', '{}', '{}', 'business', 0, 0, NULL, NULL, NULL, NULL, NULL, '2026-01-01')
+        """.trimIndent())
+        conn.createStatement().executeUpdate("""
+            INSERT INTO price_history (flight_id, amount, currency, checked_at) VALUES ('flight1', 2500.0, 'GBP', '2026-01-01')
+        """.trimIndent())
+        conn.close()
+
+        // Connect with migration
+        ClawfareDatabase.connect(path = dbPath, createSchema = true)
+
+        // Verify source_url column exists and was populated from share_link
+        val history = PriceHistoryQueries.getByFlightId("flight1")
+        assertEquals(1, history.size)
+        assertEquals("https://example.com/flight1", history[0].sourceUrl)
+
+        ClawfareDatabase.dropTables()
+    }
+
+    @Test
+    fun `migration adds stale column if missing`() {
+        val dbPath = tempDir.resolve("old-no-stale.db").toString()
+
+        val conn = java.sql.DriverManager.getConnection("jdbc:sqlite:$dbPath")
+        conn.createStatement().executeUpdate("""
+            CREATE TABLE investigations (
+                slug TEXT PRIMARY KEY, origin TEXT, destination TEXT,
+                depart_start TEXT, depart_end TEXT, return_start TEXT, return_end TEXT,
+                cabin_class TEXT, max_stops INTEGER, max_price REAL, depart_after TEXT,
+                depart_before TEXT, min_trip_days INTEGER, max_trip_days INTEGER,
+                must_include_date TEXT, max_layover_minutes INTEGER,
+                created_at TEXT, updated_at TEXT
+            )
+        """.trimIndent())
+        // No stale column
+        conn.createStatement().executeUpdate("""
+            CREATE TABLE flights (
+                id TEXT PRIMARY KEY, investigation_slug TEXT, share_link TEXT,
+                source TEXT, trip_type TEXT, ticket_structure TEXT,
+                price_amount REAL, price_currency TEXT, price_market TEXT, price_checked_at TEXT,
+                origin TEXT, destination TEXT, outbound_json TEXT, return_json TEXT,
+                booking_class TEXT, cabin_mixed INTEGER DEFAULT 0,
+                aircraft_type TEXT, fare_brand TEXT, disqualified TEXT, notes TEXT, tags TEXT,
+                captured_at TEXT
+            )
+        """.trimIndent())
+        conn.createStatement().executeUpdate("""
+            CREATE TABLE price_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, flight_id TEXT,
+                amount REAL, currency TEXT, source_url TEXT, checked_at TEXT,
+                source TEXT DEFAULT 'manual', price_market TEXT DEFAULT 'UK'
+            )
+        """.trimIndent())
+        conn.createStatement().executeUpdate("""
+            INSERT INTO investigations VALUES ('test-inv', 'LHR', 'NRT', '2026-05-01', '2026-05-15', '2026-05-15', '2026-05-30', 'business', 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '2026-01-01', '2026-01-01')
+        """.trimIndent())
+        conn.createStatement().executeUpdate("""
+            INSERT INTO flights (id, investigation_slug, share_link, source, trip_type, ticket_structure, price_amount, price_currency, price_market, price_checked_at, origin, destination, outbound_json, captured_at) VALUES ('flight1', 'test-inv', 'https://example.com/f1', 'google', 'round_trip', 'single', 2500.0, 'GBP', 'UK', '2026-01-01', 'LHR', 'NRT', '{}', '2026-01-01')
+        """.trimIndent())
+        conn.close()
+
+        // Connect with migration — should add stale column
+        ClawfareDatabase.connect(path = dbPath, createSchema = true)
+
+        // Verify stale column works
+        val flight = FlightQueries.getById("flight1")
+        assertNotNull(flight)
+        assertFalse(flight!!.stale)
+
+        // Should be able to mark stale
+        FlightQueries.update(flight.copy(stale = true))
+        assertTrue(FlightQueries.getById("flight1")!!.stale)
+
+        ClawfareDatabase.dropTables()
+    }
+}
+
+/**
+ * Tests for mark-stale command.
+ */
+class MarkStaleTest {
+    private lateinit var outStream: ByteArrayOutputStream
+    private val originalOut = System.out
+
+    @BeforeEach
+    fun setup() {
+        ClawfareDatabase.connectInMemory(createSchema = true)
+        outStream = ByteArrayOutputStream()
+        System.setOut(PrintStream(outStream))
+    }
+
+    @AfterEach
+    fun tearDown() {
+        System.setOut(originalOut)
+        ClawfareDatabase.dropTables()
+    }
+
+    private fun stdout(): String = outStream.toString()
+    private fun execute(vararg args: String): Int = CommandLine(ClawfareCommand()).execute(*args)
+
+    @Test
+    fun `mark-stale all marks all flights`() {
+        createInv("tokyo")
+        val id = createFlight("tokyo", "https://example.com/f1", 2500.0)
+
+        execute("flight", "mark-stale", "tokyo", "--all")
+
+        assertTrue(FlightQueries.getById(id)!!.stale)
+        assertTrue(stdout().contains("1 flights"))
+    }
+
+    @Test
+    fun `mark-stale fresh clears stale flag`() {
+        createInv("tokyo")
+        val id = createFlight("tokyo", "https://example.com/f1", 2500.0)
+        FlightQueries.update(FlightQueries.getById(id)!!.copy(stale = true))
+
+        execute("flight", "mark-stale", "tokyo", "--all", "--fresh")
+
+        assertFalse(FlightQueries.getById(id)!!.stale)
+    }
+
+    @Test
+    fun `mark-stale dry-run does not change`() {
+        createInv("tokyo")
+        val id = createFlight("tokyo", "https://example.com/f1", 2500.0)
+
+        execute("flight", "mark-stale", "tokyo", "--all", "--dry-run")
+
+        assertFalse(FlightQueries.getById(id)!!.stale)
+        assertTrue(stdout().contains("DRY RUN"))
+    }
+
+    @Test
+    fun `mark-stale by id marks single flight`() {
+        createInv("tokyo")
+        val id1 = createFlight("tokyo", "https://example.com/f1", 2500.0)
+        val id2 = createFlight("tokyo", "https://example.com/f2", 3000.0)
+
+        execute("flight", "mark-stale", "--id", id1)
+
+        assertTrue(FlightQueries.getById(id1)!!.stale)
+        assertFalse(FlightQueries.getById(id2)!!.stale)
+    }
+
+    private fun createInv(slug: String) = InvestigationQueries.create(InvestigationDto(slug = slug, origin = "LHR", destination = "NRT", departStart = "2026-05-01", departEnd = "2026-05-15", returnStart = "2026-05-15", returnEnd = "2026-05-30", cabinClass = "business", maxStops = 1, createdAt = Instant.now().toString(), updatedAt = Instant.now().toString()))
+
+    private fun createFlight(investigationSlug: String, shareLink: String, price: Double): String {
+        val id = FlightValidator.generateId(shareLink)
+        val now = Instant.now().toString()
+        val json = """{"depart_airport":"LHR","arrive_airport":"NRT","depart_time":"2026-05-01T10:00:00Z","arrive_time":"2026-05-02T06:00:00Z","duration_minutes":720,"stops":0,"legs":[{"flight_number":"123","airline":"BA","airline_code":"BA","depart_airport":"LHR","arrive_airport":"NRT","depart_time":"2026-05-01T10:00:00Z","arrive_time":"2026-05-02T06:00:00Z","duration_minutes":720}]}"""
+        FlightQueries.create(FlightDto(id = id, investigationSlug = investigationSlug, shareLink = shareLink, source = "google_flights", tripType = "round_trip", ticketStructure = "single", origin = "LHR", destination = "NRT", outboundJson = json, returnJson = json, capturedAt = now))
+        PriceHistoryQueries.create(PriceHistoryDto(flightId = id, amount = price, currency = "GBP", sourceUrl = shareLink, checkedAt = now))
+        return id
+    }
+}
+
+/**
+ * Tests for flight price command with link.
+ */
+class FlightPriceLinkTest {
+    private lateinit var outStream: ByteArrayOutputStream
+    private val originalOut = System.out
+
+    @BeforeEach
+    fun setup() {
+        ClawfareDatabase.connectInMemory(createSchema = true)
+        outStream = ByteArrayOutputStream()
+        System.setOut(PrintStream(outStream))
+    }
+
+    @AfterEach
+    fun tearDown() {
+        System.setOut(originalOut)
+        ClawfareDatabase.dropTables()
+    }
+
+    private fun execute(vararg args: String): Int = CommandLine(ClawfareCommand()).execute(*args)
+
+    @Test
+    fun `flight price with link records source url`() {
+        createInv("tokyo")
+        val id = createFlight("tokyo", "https://example.com/f1", 2500.0)
+
+        execute("flight", "price", id, "--amount", "2200", "--link", "https://www.google.com/travel/flights/s/abc123")
+
+        val history = PriceHistoryQueries.getByFlightId(id)
+        assertEquals(2, history.size)
+        assertEquals("https://www.google.com/travel/flights/s/abc123", history.last().sourceUrl)
+        assertEquals(2200.0, history.last().amount)
+    }
+
+    @Test
+    fun `flight price clears stale flag`() {
+        createInv("tokyo")
+        val id = createFlight("tokyo", "https://example.com/f1", 2500.0)
+        FlightQueries.update(FlightQueries.getById(id)!!.copy(stale = true))
+        assertTrue(FlightQueries.getById(id)!!.stale)
+
+        execute("flight", "price", id, "--amount", "2200")
+
+        assertFalse(FlightQueries.getById(id)!!.stale)
+    }
+
+    @Test
+    fun `flight price without link uses existing link`() {
+        createInv("tokyo")
+        val id = createFlight("tokyo", "https://example.com/original", 2500.0)
+
+        execute("flight", "price", id, "--amount", "2200")
+
+        val history = PriceHistoryQueries.getByFlightId(id)
+        assertEquals("https://example.com/original", history.last().sourceUrl)
+    }
+
+    private fun createInv(slug: String) = InvestigationQueries.create(InvestigationDto(slug = slug, origin = "LHR", destination = "NRT", departStart = "2026-05-01", departEnd = "2026-05-15", returnStart = "2026-05-15", returnEnd = "2026-05-30", cabinClass = "business", maxStops = 1, createdAt = Instant.now().toString(), updatedAt = Instant.now().toString()))
+
+    private fun createFlight(investigationSlug: String, shareLink: String, price: Double): String {
+        val id = FlightValidator.generateId(shareLink)
+        val now = Instant.now().toString()
+        val json = """{"depart_airport":"LHR","arrive_airport":"NRT","depart_time":"2026-05-01T10:00:00Z","arrive_time":"2026-05-02T06:00:00Z","duration_minutes":720,"stops":0,"legs":[{"flight_number":"123","airline":"BA","airline_code":"BA","depart_airport":"LHR","arrive_airport":"NRT","depart_time":"2026-05-01T10:00:00Z","arrive_time":"2026-05-02T06:00:00Z","duration_minutes":720}]}"""
+        FlightQueries.create(FlightDto(id = id, investigationSlug = investigationSlug, shareLink = shareLink, source = "google_flights", tripType = "round_trip", ticketStructure = "single", origin = "LHR", destination = "NRT", outboundJson = json, returnJson = json, capturedAt = now))
+        PriceHistoryQueries.create(PriceHistoryDto(flightId = id, amount = price, currency = "GBP", sourceUrl = shareLink, checkedAt = now))
+        return id
+    }
+
+    private fun createBusinessFlight(investigationSlug: String, shareLink: String, price: Double, tripType: String = "round_trip"): String {
+        val id = FlightValidator.generateId(shareLink)
+        val now = Instant.now().toString()
+        val json = """{"depart_airport":"LHR","arrive_airport":"NRT","depart_time":"2026-05-01T10:00:00Z","arrive_time":"2026-05-02T06:00:00Z","duration_minutes":720,"stops":0,"legs":[{"flight_number":"123","airline":"BA","airline_code":"BA","depart_airport":"LHR","arrive_airport":"NRT","depart_time":"2026-05-01T10:00:00Z","arrive_time":"2026-05-02T06:00:00Z","duration_minutes":720}]}"""
+        FlightQueries.create(FlightDto(id = id, investigationSlug = investigationSlug, shareLink = shareLink, source = "google_flights", tripType = tripType, ticketStructure = "single", origin = "LHR", destination = "NRT", outboundJson = json, returnJson = if (tripType == "round_trip") json else null, bookingClass = "business", capturedAt = now))
+        PriceHistoryQueries.create(PriceHistoryDto(flightId = id, amount = price, currency = "GBP", sourceUrl = shareLink, checkedAt = now))
+        return id
+    }
+
+    // === Price validation tests ===
+
+    @Test
+    fun `flight price rejects non-URL link`() {
+        createInv("tokyo")
+        val id = createFlight("tokyo", "https://example.com/f1", 2500.0)
+        val exitCode = execute("flight", "price", id, "--amount", "2200", "--link", "gf-ba-may1-22")
+        assertEquals(1, exitCode)
+    }
+
+    @Test
+    fun `flight price rejects fabricated google flights URL`() {
+        createInv("tokyo")
+        val id = createFlight("tokyo", "https://example.com/f1", 2500.0)
+        val exitCode = execute("flight", "price", id, "--amount", "2200", "--link", "https://google.com/flights?ba-may1-22")
+        assertEquals(1, exitCode)
+    }
+
+    @Test
+    fun `flight price rejects google flights search URL`() {
+        createInv("tokyo")
+        val id = createFlight("tokyo", "https://example.com/f1", 2500.0)
+        val exitCode = execute("flight", "price", id, "--amount", "2200", "--link", "https://www.google.com/travel/flights?q=Flights+to+TYO")
+        assertEquals(1, exitCode)
+    }
+
+    @Test
+    fun `flight price accepts google flights share link`() {
+        createInv("tokyo")
+        val id = createFlight("tokyo", "https://example.com/f1", 2500.0)
+        val exitCode = execute("flight", "price", id, "--amount", "2200", "--link", "https://www.google.com/travel/flights/s/abc123")
+        assertEquals(0, exitCode)
+    }
+
+    @Test
+    fun `flight price accepts google flights booking link`() {
+        createInv("tokyo")
+        val id = createFlight("tokyo", "https://example.com/f1", 2500.0)
+        val exitCode = execute("flight", "price", id, "--amount", "2200", "--link", "https://www.google.com/travel/flights/booking?tfs=CAIQAh")
+        assertEquals(0, exitCode)
+    }
+
+    @Test
+    fun `flight price rejects business RT below floor`() {
+        createInv("tokyo")
+        val id = createBusinessFlight("tokyo", "https://example.com/f1", 3000.0, "round_trip")
+        val exitCode = execute("flight", "price", id, "--amount", "1200")
+        assertEquals(1, exitCode)
+    }
+
+    @Test
+    fun `flight price rejects business OW below floor`() {
+        createInv("tokyo")
+        val id = createBusinessFlight("tokyo", "https://example.com/f2", 2000.0, "one_way")
+        val exitCode = execute("flight", "price", id, "--amount", "500")
+        assertEquals(1, exitCode)
+    }
+
+    @Test
+    fun `flight price warns on large deviation without force`() {
+        createInv("tokyo")
+        val id = createFlight("tokyo", "https://example.com/f1", 3000.0)
+        val exitCode = execute("flight", "price", id, "--amount", "1000")
+        assertEquals(1, exitCode)
+    }
+
+    @Test
+    fun `flight price allows large deviation with force`() {
+        createInv("tokyo")
+        val id = createFlight("tokyo", "https://example.com/f1", 3000.0)
+        val exitCode = execute("flight", "price", id, "--amount", "1000", "--force")
+        assertEquals(0, exitCode)
+    }
+
+    @Test
+    fun `flight price rejects negative amount`() {
+        createInv("tokyo")
+        val id = createFlight("tokyo", "https://example.com/f1", 2500.0)
+        val exitCode = execute("flight", "price", id, "--amount", "-100")
+        assertEquals(1, exitCode)
+    }
+
+    @Test
+    fun `flight price rejects price above ceiling`() {
+        createInv("tokyo")
+        val id = createFlight("tokyo", "https://example.com/f1", 2500.0)
+        val exitCode = execute("flight", "price", id, "--amount", "50000", "--force")
+        assertEquals(1, exitCode)
+    }
 }

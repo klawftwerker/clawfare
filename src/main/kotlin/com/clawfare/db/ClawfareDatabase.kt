@@ -149,6 +149,18 @@ object ClawfareDatabase {
                 stmt.executeUpdate("ALTER TABLE flights ADD COLUMN price_checked_at TEXT DEFAULT ''")
             }
 
+            // Migration: Add new investigation columns if missing
+            val invCols = getTableColumns(conn, "investigations")
+            if (!invCols.contains("max_price")) {
+                stmt.executeUpdate("ALTER TABLE investigations ADD COLUMN max_price DOUBLE PRECISION")
+            }
+            if (!invCols.contains("depart_after")) {
+                stmt.executeUpdate("ALTER TABLE investigations ADD COLUMN depart_after TEXT")
+            }
+            if (!invCols.contains("depart_before")) {
+                stmt.executeUpdate("ALTER TABLE investigations ADD COLUMN depart_before TEXT")
+            }
+
             stmt.close()
         }
     }

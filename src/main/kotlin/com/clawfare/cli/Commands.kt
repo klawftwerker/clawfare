@@ -341,7 +341,7 @@ class InvResumeCommand : Callable<Int> {
                 println()
                 println("--- Needs Price Refresh (${staleFlights.size}) ---")
                 staleFlights.forEach { f ->
-                    println("  ${f.id}: ${f.shareLink}")
+                    println("  ${f.id}: ${f.sourceUrl}")
                 }
             }
         }
@@ -585,6 +585,7 @@ class InvUrlsCommand : Callable<Int> {
         FlightTagCommand::class,
         FlightUntagCommand::class,
         FlightPriceCommand::class,
+        FlightPriceDeleteCommand::class,
         FlightMarkStaleCommand::class,
         FlightStaleCommand::class,
         FlightHistoryCommand::class,
@@ -758,14 +759,11 @@ class FlightAddCommand : Callable<Int> {
             FlightDto(
                 id = id,
                 investigationSlug = investigationSlug,
+                // Deprecated: keeping for backward compat, canonical link in price_history
                 shareLink = shareLink,
                 source = source,
                 tripType = tripType,
                 ticketStructure = ticketStructure,
-                priceAmount = priceAmount,
-                priceCurrency = priceCurrency.uppercase(),
-                priceMarket = priceMarket.uppercase(),
-                priceCheckedAt = now,
                 origin = outbound.departAirport,
                 destination = outbound.arriveAirport,
                 outboundJson = outboundJson,
@@ -782,12 +780,13 @@ class FlightAddCommand : Callable<Int> {
         try {
             FlightQueries.create(dto)
 
-            // Add initial price to history
+            // Canonical: price + link in price_history
             PriceHistoryQueries.create(
                 PriceHistoryDto(
                     flightId = id,
                     amount = priceAmount,
                     currency = priceCurrency.uppercase(),
+                    sourceUrl = shareLink,
                     checkedAt = now,
                     priceMarket = priceMarket.uppercase(),
                 ),
@@ -958,7 +957,9 @@ class FlightListCommand : Callable<Int> {
                         
                         val timestamp = price.checkedAt.take(16).replace("T", " ")
                         val sourceTag = if (price.source != "kraftwerker") " [${price.source}]" else ""
-                        println("  $timestamp │ ${Output.formatPrice(price.amount, price.currency).padStart(9)} │ $change$sourceTag")
+                        val urlTag = if (price.sourceUrl.isNotBlank()) " ${price.sourceUrl}" else ""
+                        val idTag = if (price.id != null) "#${price.id} " else ""
+                        println("  $idTag$timestamp │ ${Output.formatPrice(price.amount, price.currency).padStart(9)} │ $change$sourceTag$urlTag")
                         prevPrice = price.amount
                     }
                 }
@@ -1297,6 +1298,20 @@ class FlightPriceCommand : Callable<Int> {
     @Option(names = ["--market", "-m"], description = ["Price market (e.g., UK, US)"])
     var market: String? = null
 
+    @Option(names = ["--force", "-f"], description = ["Bypass sanity warnings (not hard errors)"])
+    var force: Boolean = false
+
+    companion object {
+        // Minimum believable one-way business class price (GBP)
+        private const val MIN_BUSINESS_OW_GBP = 800.0
+        // Minimum believable round-trip business class price (GBP)
+        private const val MIN_BUSINESS_RT_GBP = 1500.0
+        // Maximum believable price (GBP) — sanity ceiling
+        private const val MAX_PRICE_GBP = 30000.0
+        // Percentage deviation from previous price that triggers a warning
+        private const val LARGE_DEVIATION_THRESHOLD = 0.50
+    }
+
     override fun call(): Int {
         parent.parent.ensureDb()
 
@@ -1309,10 +1324,71 @@ class FlightPriceCommand : Callable<Int> {
         val newCurrency = (currency ?: flightWithPrice.priceCurrency).uppercase()
         val newMarket = market ?: flightWithPrice.priceMarket
         val sourceUrl = link ?: flightWithPrice.sourceUrl
-        
-        // Warn if no link provided and existing link is empty
-        if (sourceUrl.isBlank()) {
+
+        // === VALIDATION: Source URL ===
+        if (link != null) {
+            val (linkValid, linkError) = FlightValidator.validateShareLink(link!!)
+            if (!linkValid) {
+                // Check if it's a search URL warning (soft) vs hard error
+                val searchWarning = FlightValidator.checkSearchUrl(link!!)
+                if (searchWarning != null && force) {
+                    // --force bypasses search URL warnings
+                    Output.warn("Search URL accepted with --force: $searchWarning")
+                } else {
+                    Output.error("Invalid source URL: $linkError")
+                    return 1
+                }
+            }
+        } else if (sourceUrl.isBlank()) {
             Output.warn("No source URL provided. Consider using --link to track where this price came from.")
+        }
+
+        // === VALIDATION: Price amount ===
+        if (amount <= 0) {
+            Output.error("Price must be positive (got $amount)")
+            return 1
+        }
+
+        // Price floor checks (hard errors — these are never valid)
+        val isRT = flightWithPrice.flight.tripType == "round_trip"
+        val isBusiness = flightWithPrice.flight.bookingClass?.lowercase()?.contains("business") == true
+        if (newCurrency == "GBP" && isBusiness) {
+            val floor = if (isRT) MIN_BUSINESS_RT_GBP else MIN_BUSINESS_OW_GBP
+            val tripLabel = if (isRT) "round-trip" else "one-way"
+            if (amount < floor) {
+                Output.error(
+                    "£${String.format("%.0f", amount)} is below the minimum believable " +
+                    "business class $tripLabel price (£${String.format("%.0f", floor)}). " +
+                    "This is likely an economy price or a data entry error."
+                )
+                return 1
+            }
+        }
+
+        // Price ceiling check (hard error)
+        if (newCurrency == "GBP" && amount > MAX_PRICE_GBP) {
+            Output.error(
+                "£${String.format("%.0f", amount)} exceeds maximum believable price " +
+                "(£${String.format("%.0f", MAX_PRICE_GBP)}). Check the currency and amount."
+            )
+            return 1
+        }
+
+        // Large deviation warning (soft — bypassable with --force)
+        val oldAmount = flightWithPrice.priceAmount
+        if (oldAmount > 0 && !force) {
+            val deviation = kotlin.math.abs(amount - oldAmount) / oldAmount
+            if (deviation > LARGE_DEVIATION_THRESHOLD) {
+                val direction = if (amount > oldAmount) "increase" else "decrease"
+                val pctStr = String.format("%.0f%%", deviation * 100)
+                Output.warn(
+                    "Price $direction of $pctStr " +
+                    "(${Output.formatPrice(oldAmount, flightWithPrice.priceCurrency)} → " +
+                    "${Output.formatPrice(amount, newCurrency)}). " +
+                    "Use --force to confirm this is correct."
+                )
+                return 1
+            }
         }
 
         val oldPrice = Output.formatPrice(flightWithPrice.priceAmount, flightWithPrice.priceCurrency)
@@ -1354,6 +1430,76 @@ class FlightPriceCommand : Callable<Int> {
         if (flightWithPrice.flight.stale) {
             println("  ✓ Cleared stale flag")
         }
+        return 0
+    }
+}
+
+/**
+ * Delete a specific price history entry by its ID.
+ * Use `flight show <id> --history` to find the price entry # to delete.
+ */
+@Command(
+    name = "price-delete",
+    description = ["Delete a specific price history entry"],
+)
+class FlightPriceDeleteCommand : Callable<Int> {
+    @ParentCommand
+    lateinit var parent: FlightCommand
+
+    @Parameters(index = "0", description = ["Price history entry ID (the # column from --history)"])
+    var priceId: Int = 0
+
+    @Option(names = ["--force", "-f"], description = ["Skip confirmation"])
+    var force: Boolean = false
+
+    override fun call(): Int {
+        parent.parent.ensureDb()
+
+        val entry = PriceHistoryQueries.getById(priceId)
+        if (entry == null) {
+            Output.error("Price history entry #$priceId not found")
+            return 1
+        }
+
+        val flight = FlightQueries.getById(entry.flightId)
+        val flightLabel = flight?.let { "${it.id.take(8)} (${it.origin}→${it.destination})" } ?: entry.flightId.take(8)
+
+        println("Price entry #${entry.id}:")
+        println("  Flight: $flightLabel")
+        println("  Amount: ${Output.formatPrice(entry.amount, entry.currency)}")
+        println("  Date:   ${entry.checkedAt.take(19).replace("T", " ")}")
+        println("  Source: ${entry.sourceUrl.ifBlank { "—" }}")
+
+        if (!force) {
+            Output.warn("Use --force to confirm deletion of this price entry.")
+            return 1
+        }
+
+        val deleted = PriceHistoryQueries.deleteById(priceId)
+        if (!deleted) {
+            Output.error("Failed to delete price entry #$priceId")
+            return 1
+        }
+
+        // If this was the latest price, update the flight's denormalized price to the new latest
+        val remaining = PriceHistoryQueries.getByFlightId(entry.flightId)
+        if (remaining.isNotEmpty() && flight != null) {
+            val latest = remaining.maxByOrNull { it.checkedAt }!!
+            FlightQueries.update(
+                flight.copy(
+                    priceAmount = latest.amount,
+                    priceCurrency = latest.currency,
+                    priceCheckedAt = latest.checkedAt,
+                    stale = true, // mark stale since we just removed data
+                )
+            )
+            println("  ✓ Updated flight price to ${Output.formatPrice(latest.amount, latest.currency)} (previous entry)")
+        } else if (flight != null) {
+            // No price history left — mark stale
+            FlightQueries.update(flight.copy(stale = true))
+        }
+
+        Output.success("Deleted price entry #$priceId")
         return 0
     }
 }
@@ -1734,8 +1880,8 @@ class FlightTasksCommand : Callable<Int> {
             return 1
         }
 
-        val allFlights = FlightQueries.listByInvestigation(slug)
-        val flights = if (includeAll) allFlights else allFlights.filter { it.stale }
+        val allFlights = FlightQueries.listWithPrices(slug)
+        val flights = if (includeAll) allFlights else allFlights.filter { it.flight.stale }
 
         if (flights.isEmpty()) {
             if (includeAll) {
@@ -1755,7 +1901,7 @@ class FlightTasksCommand : Callable<Int> {
         // Group by source domain
         val byDomain = flights.groupBy { flight ->
             try {
-                java.net.URI(flight.shareLink).host?.replace("www.", "") ?: "unknown"
+                java.net.URI(flight.sourceUrl).host?.replace("www.", "") ?: "unknown"
             } catch (_: Exception) {
                 "unknown"
             }
@@ -1780,8 +1926,8 @@ class FlightTasksCommand : Callable<Int> {
                     val route = "${flight.origin}→${flight.destination}"
                     val price = Output.formatPrice(flight.priceAmount, flight.priceCurrency)
                     println("  - [$departDate] $route $price")
-                    println("    ${flight.shareLink}")
-                    println("    Update: clawfare flight price ${flight.id.take(8)} --amount <NEW_PRICE>")
+                    println("    ${flight.sourceUrl}")
+                    println("    Update: clawfare flight price ${flight.id.take(8)} --amount <NEW_PRICE> --link <URL>")
                     println()
                 }
             }
@@ -1860,6 +2006,7 @@ class FlightCoverageCommand : Callable<Int> {
         }
 
         val flights = FlightQueries.listByInvestigation(slug)
+        val flightsWithPrices = FlightQueries.listWithPrices(slug)
 
         println("COVERAGE ANALYSIS: $slug")
         println("=" .repeat(50))
@@ -1983,7 +2130,7 @@ class FlightCoverageCommand : Callable<Int> {
         if (inv.minTripDays != null && inv.maxTripDays != null && inv.mustIncludeDate != null) {
             println("TRIP COMBINATIONS")
             println("-----------------")
-            analyzeTrips(inv, flights)
+            analyzeTrips(inv, flightsWithPrices)
         }
 
         return 0
@@ -2000,7 +2147,7 @@ class FlightCoverageCommand : Callable<Int> {
         return dates
     }
 
-    private fun analyzeTrips(inv: InvestigationDto, flights: List<FlightDto>) {
+    private fun analyzeTrips(inv: InvestigationDto, flights: List<FlightWithPrice>) {
         val mustInclude = java.time.LocalDate.parse(inv.mustIncludeDate!!)
         val minDays = inv.minTripDays!!
         val maxDays = inv.maxTripDays!!
@@ -2039,7 +2186,7 @@ class FlightCoverageCommand : Callable<Int> {
 
         // Find cheapest valid two-one-way combination
         if (oneWayOut.isNotEmpty() && oneWayBack.isNotEmpty()) {
-            var cheapestCombo: Pair<FlightDto, FlightDto>? = null
+            var cheapestCombo: Pair<FlightWithPrice, FlightWithPrice>? = null
             var cheapestTotal = Double.MAX_VALUE
 
             for (out in oneWayOut) {
@@ -2465,14 +2612,11 @@ class FlightImportCommand : Callable<Int> {
         val dto = FlightDto(
             id = id,
             investigationSlug = inv.slug,
+            // Deprecated: keeping for backward compat
             shareLink = imported.link ?: idSource,
             source = "import",
             tripType = if (imported.returnDate != null) "round_trip" else "one_way",
             ticketStructure = "single",
-            priceAmount = imported.price,
-            priceCurrency = imported.currency.uppercase(),
-            priceMarket = "UK",
-            priceCheckedAt = now,
             origin = imported.origin,
             destination = imported.destination,
             outboundJson = Json.encodeToString(FlightSegment.serializer(), outboundSegment),
@@ -2489,14 +2633,15 @@ class FlightImportCommand : Callable<Int> {
         try {
             FlightQueries.create(dto)
 
-            // Add initial price
+            // Canonical: price + link in price_history
             PriceHistoryQueries.create(
                 PriceHistoryDto(
                     flightId = id,
                     amount = imported.price,
                     currency = imported.currency.uppercase(),
+                    sourceUrl = imported.link ?: "",
                     checkedAt = now,
-                    priceMarket = "UK", // Default to UK market
+                    priceMarket = "UK",
                 )
             )
 
@@ -3148,7 +3293,7 @@ class FlightImportDbCommand : Callable<Int> {
                         flightSkipped++
                         // Import price history for existing flights if we have new prices
                         if (!skipPrices && existingById != null) {
-                            pricesImported += importPriceHistory(sourceConn, flightId, flightId, dryRun)
+                            pricesImported += importPriceHistory(sourceConn, flightId, flightId, dryRun, shareLink)
                         }
                     } else {
                         if (dryRun) {
@@ -3192,7 +3337,27 @@ class FlightImportDbCommand : Callable<Int> {
 
                         // Import price history for new flights
                         if (!skipPrices) {
-                            pricesImported += importPriceHistory(sourceConn, flightId, flightId, dryRun)
+                            val imported = importPriceHistory(sourceConn, flightId, flightId, dryRun, shareLink)
+                            pricesImported += imported
+                            
+                            // If no price history was imported, create one from flight's price fields
+                            if (imported == 0 && !dryRun) {
+                                val priceAmount = try { flightRs.getDouble("price_amount") } catch (_: Exception) { 0.0 }
+                                val priceCurrency = getColumnSafe(flightRs, "price_currency") ?: "GBP"
+                                if (priceAmount > 0) {
+                                    PriceHistoryQueries.create(
+                                        PriceHistoryDto(
+                                            flightId = flightId,
+                                            amount = priceAmount,
+                                            currency = priceCurrency,
+                                            sourceUrl = shareLink ?: "",
+                                            checkedAt = getColumnSafe(flightRs, "price_checked_at") ?: Instant.now().toString(),
+                                            priceMarket = getColumnSafe(flightRs, "price_market") ?: "UK",
+                                        )
+                                    )
+                                    pricesImported++
+                                }
+                            }
                         }
                     }
                 }
@@ -3223,6 +3388,7 @@ class FlightImportDbCommand : Callable<Int> {
         sourceFlightId: String,
         targetFlightId: String,
         dryRun: Boolean,
+        fallbackUrl: String? = null,
     ): Int {
         val priceStmt = sourceConn.prepareStatement(
             "SELECT * FROM price_history WHERE flight_id = ? ORDER BY checked_at"
@@ -3249,6 +3415,7 @@ class FlightImportDbCommand : Callable<Int> {
                         flightId = targetFlightId,
                         amount = priceRs.getDouble("amount"),
                         currency = priceRs.getString("currency"),
+                        sourceUrl = getColumnSafe(priceRs, "source_url")?.takeIf { it.isNotBlank() } ?: fallbackUrl ?: "",
                         checkedAt = checkedAt,
                         source = getColumnSafe(priceRs, "price_source") ?: getColumnSafe(priceRs, "source") ?: "imported",
                         priceMarket = getColumnSafe(priceRs, "price_market") ?: "UK",

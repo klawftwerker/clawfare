@@ -644,6 +644,28 @@ object PriceHistoryQueries {
             PriceHistory.deleteWhere { PriceHistory.flightId eq flightId }
         }
 
+    /**
+     * Get a single price history entry by its ID.
+     */
+    fun getById(id: Int): PriceHistoryDto? =
+        transaction {
+            PriceHistory
+                .selectAll()
+                .where { PriceHistory.id eq id }
+                .map { it.toPriceHistoryDto() }
+                .singleOrNull()
+        }
+
+    /**
+     * Delete a specific price history entry by its ID.
+     *
+     * @return true if an entry was deleted
+     */
+    fun deleteById(id: Int): Boolean =
+        transaction {
+            PriceHistory.deleteWhere { PriceHistory.id eq id } > 0
+        }
+
     private fun ResultRow.toPriceHistoryDto(): PriceHistoryDto =
         PriceHistoryDto(
             id = this[PriceHistory.id],

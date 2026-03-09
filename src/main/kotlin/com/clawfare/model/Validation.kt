@@ -488,6 +488,8 @@ object FlightValidator {
         Regex("""kayak\.[^/]+/flights/[A-Z]{3}-[A-Z]{3}/\d{4}-\d{2}-\d{2}(/\d{4}-\d{2}-\d{2})?\?"""),
         // Google Flights search (not /booking/ or /s/ share links)
         Regex("""google\.com/travel/flights(?!/(booking|s/))"""),
+        // google.com/flights is not a real path — likely fabricated
+        Regex("""google\.com/flights\b"""),
         // Skyscanner search pages
         Regex("""skyscanner\.[^/]+/transport/flights/[^/]+/[^/]+/\d{6}/\d{6}/\?"""),
         // Amex travel search
