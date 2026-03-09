@@ -79,6 +79,16 @@ object Output {
         flight: FlightDto,
         segment: FlightSegment?,
         returnSeg: FlightSegment?,
+    ): String = formatFlightDetail(flight, segment, returnSeg, null)
+
+    /**
+     * Format a flight for detailed display, including price info.
+     */
+    fun formatFlightDetail(
+        flight: FlightDto,
+        segment: FlightSegment?,
+        returnSeg: FlightSegment?,
+        latestPrice: PriceHistoryDto?,
     ): String =
         buildString {
             appendLine("Flight: ${flight.id}")
@@ -86,6 +96,7 @@ object Output {
             appendLine("  Route:     ${flight.origin} → ${flight.destination}")
             appendLine("  Type:      ${flight.tripType} / ${flight.ticketStructure}")
             appendLine("  Source:    ${flight.source}")
+            appendLine("  Status:    ${if (flight.stale) "⚠ STALE (needs price check)" else "✓ Fresh"}")
             flight.aircraftType?.let { appendLine("  Aircraft:  $it") }
             flight.fareBrand?.let { appendLine("  Fare:      $it") }
             flight.disqualified?.let { appendLine("  ❌ Disqualified: $it") }
@@ -119,8 +130,26 @@ object Output {
             if (!flight.notes.isNullOrBlank()) {
                 appendLine("  Notes:     ${flight.notes}")
             }
+            
+            // Price section
             appendLine()
-            appendLine("  Link:      ${flight.shareLink}")
+            if (latestPrice != null) {
+                appendLine("  Latest Price:")
+                appendLine("    Amount:  ${formatPrice(latestPrice.amount, latestPrice.currency)}")
+                appendLine("    Link:    ${latestPrice.sourceUrl}")
+                appendLine("    Checked: ${latestPrice.checkedAt}")
+                appendLine("    Market:  ${latestPrice.priceMarket}")
+            } else {
+                appendLine("  Price:     No price history")
+            }
+            
+            // Legacy link (if different from price link)
+            if (!flight.shareLink.isNullOrBlank() && flight.shareLink != latestPrice?.sourceUrl) {
+                appendLine()
+                appendLine("  Legacy Link: ${flight.shareLink}")
+            }
+            
+            appendLine()
             appendLine("  Captured:  ${flight.capturedAt}")
         }
 
@@ -220,7 +249,7 @@ object Output {
             return "No flights found."
         }
 
-        val headers = listOf("ID", "Price", "Cabin", "Airline", "Route", "Layover", "Depart", "Type")
+        val headers = listOf("ID", "Price", "S", "Cabin", "Airline", "Route", "Layover", "Depart", "Type")
         val rows =
             flights.map { flight ->
                 val outbound = parseSegment(flight.outboundJson)
@@ -229,9 +258,11 @@ object Output {
                 val layover = formatLayovers(outbound, returnSeg)
                 val departDate = outbound?.departTime?.substring(0, 10) ?: "?"
                 val typeFlag = if (flight.tripType == "round_trip") "RT" else "OW"
+                val staleFlag = if (flight.flight.stale) "!" else "✓"
                 listOf(
                     flight.id.take(8),
                     formatPrice(flight.priceAmount, flight.priceCurrency),
+                    staleFlag,
                     flight.bookingClass ?: "?",
                     airline,
                     "${flight.origin}→${flight.destination}",

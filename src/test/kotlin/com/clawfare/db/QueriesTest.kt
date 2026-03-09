@@ -214,14 +214,14 @@ class QueriesTest {
     }
 
     @Test
-    fun `update price only`() {
+    fun `update price via dto`() {
         InvestigationQueries.create(createTestInvestigation("tokyo-2026"))
-        FlightQueries.create(createTestFlight("abc123", "tokyo-2026"))
+        val flight = FlightQueries.create(createTestFlight("abc123", "tokyo-2026"))
 
-        val updated = FlightQueries.updatePrice("abc123", 1999.0, "GBP")
+        val updated = FlightQueries.update(flight.copy(priceAmount = 1999.0, priceCurrency = "GBP"))
 
         assertNotNull(updated)
-        assertEquals(1999.0, updated.priceAmount)
+        assertEquals(1999.0, updated!!.priceAmount)
         assertEquals("GBP", updated.priceCurrency)
     }
 

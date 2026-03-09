@@ -108,6 +108,12 @@
     "allDeclaredConstructors": true
   },
   {
+    "name": "com.clawfare.cli.FlightMarkStaleCommand",
+    "allDeclaredFields": true,
+    "allDeclaredMethods": true,
+    "allDeclaredConstructors": true
+  },
+  {
     "name": "com.clawfare.cli.FlightStaleCommand",
     "allDeclaredFields": true,
     "allDeclaredMethods": true,
@@ -121,6 +127,18 @@
   },
   {
     "name": "com.clawfare.cli.FlightRefreshCommand",
+    "allDeclaredFields": true,
+    "allDeclaredMethods": true,
+    "allDeclaredConstructors": true
+  },
+  {
+    "name": "com.clawfare.cli.FlightTasksCommand",
+    "allDeclaredFields": true,
+    "allDeclaredMethods": true,
+    "allDeclaredConstructors": true
+  },
+  {
+    "name": "com.clawfare.cli.FlightCoverageCommand",
     "allDeclaredFields": true,
     "allDeclaredMethods": true,
     "allDeclaredConstructors": true
@@ -157,6 +175,12 @@
   },
   {
     "name": "com.clawfare.cli.FlightImportResultsCommand",
+    "allDeclaredFields": true,
+    "allDeclaredMethods": true,
+    "allDeclaredConstructors": true
+  },
+  {
+    "name": "com.clawfare.cli.FlightImportDbCommand",
     "allDeclaredFields": true,
     "allDeclaredMethods": true,
     "allDeclaredConstructors": true

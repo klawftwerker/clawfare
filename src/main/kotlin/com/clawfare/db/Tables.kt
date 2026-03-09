@@ -39,10 +39,17 @@ object Investigations : Table("investigations") {
 object Flights : Table("flights") {
     val id = text("id")
     val investigationSlug = text("investigation_slug").references(Investigations.slug)
-    val shareLink = text("share_link").uniqueIndex()
+    val shareLink = text("share_link").nullable()  // Deprecated: canonical link in price_history.source_url
     val flightSource = text("source")
     val tripType = text("trip_type")
     val ticketStructure = text("ticket_structure")
+
+    // Deprecated price fields - kept for backward compat with existing DB rows
+    // Canonical price data is now in price_history table
+    val priceAmount = double("price_amount").nullable()
+    val priceCurrency = text("price_currency").nullable()
+    val priceMarket = text("price_market").nullable()
+    val priceCheckedAt = text("price_checked_at").nullable()
 
     val origin = text("origin")
     val destination = text("destination")
@@ -52,6 +59,7 @@ object Flights : Table("flights") {
 
     val bookingClass = text("booking_class").nullable()
     val cabinMixed = integer("cabin_mixed").default(0)
+    val stale = integer("stale").default(0)
     val aircraftType = text("aircraft_type").nullable()
     val fareBrand = text("fare_brand").nullable()
     val disqualified = text("disqualified").nullable()
@@ -66,15 +74,17 @@ object Flights : Table("flights") {
 /**
  * Exposed table definition for price history.
  * Tracks all price observations for a flight over time.
- * Each observation has a source (which agent/system recorded it).
+ * Each observation has a source URL (where we saw the price) and source (which system).
+ * This is now the canonical location for prices and links.
  */
 object PriceHistory : Table("price_history") {
     val id = integer("id").autoIncrement()
     val flightId = text("flight_id").references(Flights.id)
     val amount = double("amount")
     val currency = text("currency")
+    val sourceUrl = text("source_url")  // The link where this price was observed
     val checkedAt = text("checked_at")
-    val priceSource = text("source").default("kraftwerker")
+    val priceSource = text("source").default("manual")
     val priceMarket = text("price_market").default("UK")
 
     override val primaryKey = PrimaryKey(id)

@@ -14,7 +14,12 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+libsqlitejdbc.so
 
 # Test databases
 *.db
 clawfare-linux-amd64
+
+# Project notes (not clawfare)
+COVERAGE-NOTES.md
+

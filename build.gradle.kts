@@ -37,9 +37,7 @@ dependencies {
 
 application {
     mainClass.set("com.clawfare.MainKt")
-    applicationDefaultJvmArgs = listOf(
-        "--enable-native-access=ALL-UNNAMED",
-    )
+    applicationDefaultJvmArgs = listOf("--enable-native-access=ALL-UNNAMED")
 }
 
 kotlin {

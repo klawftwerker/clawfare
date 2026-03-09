@@ -216,6 +216,10 @@ object JsonImporter {
                     TripType.ONE_WAY -> "one_way"
                 },
             ticketStructure = entry.ticketStructure.name.lowercase(),
+            priceAmount = entry.priceAmount,
+            priceCurrency = entry.priceCurrency,
+            priceMarket = entry.priceMarket,
+            priceCheckedAt = entry.priceCheckedAt,
             origin = entry.origin,
             destination = entry.destination,
             outboundJson = outboundJson,

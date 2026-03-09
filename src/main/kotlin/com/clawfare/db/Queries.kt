@@ -46,16 +46,23 @@ data class InvestigationDto(
 data class FlightDto(
     val id: String,
     val investigationSlug: String,
-    val shareLink: String,
+    val shareLink: String? = null,  // Deprecated: canonical link now in price_history.source_url
     val source: String,
     val tripType: String,
     val ticketStructure: String,
+    // Deprecated price fields - canonical data now in price_history
+    // Kept for backward compatibility with existing DB rows
+    val priceAmount: Double = 0.0,
+    val priceCurrency: String = "GBP",
+    val priceMarket: String = "UK",
+    val priceCheckedAt: String = "",
     val origin: String,
     val destination: String,
     val outboundJson: String,
     val returnJson: String? = null,
     val bookingClass: String? = null,
     val cabinMixed: Boolean = false,
+    val stale: Boolean = false,
     val aircraftType: String? = null,
     val fareBrand: String? = null,
     val disqualified: String? = null,
@@ -74,10 +81,11 @@ data class FlightWithPrice(
     val priceMarket: String,
     val priceCheckedAt: String,
     val priceSource: String,
+    val sourceUrl: String,
 ) {
     val id: String get() = flight.id
     val investigationSlug: String get() = flight.investigationSlug
-    val shareLink: String get() = flight.shareLink
+    val shareLink: String get() = sourceUrl  // Use sourceUrl from price_history
     val source: String get() = flight.source
     val tripType: String get() = flight.tripType
     val ticketStructure: String get() = flight.ticketStructure
@@ -97,14 +105,16 @@ data class FlightWithPrice(
 
 /**
  * Price history entry data class.
+ * sourceUrl is required for new entries - this is the canonical location for links.
  */
 data class PriceHistoryDto(
     val id: Int? = null,
     val flightId: String,
     val amount: Double,
     val currency: String,
+    val sourceUrl: String = "",  // Required for new entries; empty = legacy migrated data
     val checkedAt: String = Instant.now().toString(),
-    val source: String = "kraftwerker",
+    val source: String = "manual",
     val priceMarket: String = "UK",
 )
 
@@ -284,12 +294,18 @@ object FlightQueries {
                 it[flightSource] = dto.source
                 it[tripType] = dto.tripType
                 it[ticketStructure] = dto.ticketStructure
+                // Deprecated fields - write for backward compat
+                it[priceAmount] = dto.priceAmount
+                it[priceCurrency] = dto.priceCurrency
+                it[priceMarket] = dto.priceMarket
+                it[priceCheckedAt] = dto.priceCheckedAt
                 it[origin] = dto.origin
                 it[destination] = dto.destination
                 it[outboundJson] = dto.outboundJson
                 it[returnJson] = dto.returnJson
                 it[bookingClass] = dto.bookingClass
                 it[cabinMixed] = if (dto.cabinMixed) 1 else 0
+                it[stale] = if (dto.stale) 1 else 0
                 it[aircraftType] = dto.aircraftType
                 it[fareBrand] = dto.fareBrand
                 it[disqualified] = dto.disqualified
@@ -336,8 +352,37 @@ object FlightQueries {
      *
      * @return Flight or null if not found
      */
+    fun getBySourceUrl(sourceUrl: String): FlightDto? =
+        transaction {
+            val priceEntry = PriceHistory
+                .selectAll()
+                .where { PriceHistory.sourceUrl eq sourceUrl }
+                .limit(1)
+                .firstOrNull()
+            
+            priceEntry?.let { getById(it[PriceHistory.flightId]) }
+        }
+
+    /**
+     * Get flight by share link (DEPRECATED - use getBySourceUrl instead).
+     * This looks up by the legacy share_link field on flights.
+     *
+     * @return Flight or null if not found
+     */
     fun getByShareLink(shareLink: String): FlightDto? =
         transaction {
+            // First try price_history (new canonical location)
+            val priceEntry = PriceHistory
+                .selectAll()
+                .where { PriceHistory.sourceUrl eq shareLink }
+                .limit(1)
+                .firstOrNull()
+            
+            if (priceEntry != null) {
+                return@transaction getById(priceEntry[PriceHistory.flightId])
+            }
+            
+            // Fall back to legacy flights.share_link
             Flights
                 .selectAll()
                 .where { Flights.shareLink eq shareLink }
@@ -380,12 +425,18 @@ object FlightQueries {
                     it[flightSource] = dto.source
                     it[tripType] = dto.tripType
                     it[ticketStructure] = dto.ticketStructure
+                    // Deprecated price fields - write for backward compat
+                    it[priceAmount] = dto.priceAmount
+                    it[priceCurrency] = dto.priceCurrency
+                    it[priceMarket] = dto.priceMarket
+                    it[priceCheckedAt] = dto.priceCheckedAt
                     it[origin] = dto.origin
                     it[destination] = dto.destination
                     it[outboundJson] = dto.outboundJson
                     it[returnJson] = dto.returnJson
                     it[bookingClass] = dto.bookingClass
                     it[cabinMixed] = if (dto.cabinMixed) 1 else 0
+                    it[stale] = if (dto.stale) 1 else 0
                     it[aircraftType] = dto.aircraftType
                     it[fareBrand] = dto.fareBrand
                     it[disqualified] = dto.disqualified
@@ -440,12 +491,18 @@ object FlightQueries {
             source = this[Flights.flightSource],
             tripType = this[Flights.tripType],
             ticketStructure = this[Flights.ticketStructure],
+            // Deprecated price fields - read from DB for backward compat
+            priceAmount = this[Flights.priceAmount] ?: 0.0,
+            priceCurrency = this[Flights.priceCurrency] ?: "GBP",
+            priceMarket = this[Flights.priceMarket] ?: "UK",
+            priceCheckedAt = this[Flights.priceCheckedAt] ?: "",
             origin = this[Flights.origin],
             destination = this[Flights.destination],
             outboundJson = this[Flights.outboundJson],
             returnJson = this[Flights.returnJson],
             bookingClass = this[Flights.bookingClass],
             cabinMixed = this[Flights.cabinMixed] == 1,
+            stale = this[Flights.stale] == 1,
             aircraftType = this[Flights.aircraftType],
             fareBrand = this[Flights.fareBrand],
             disqualified = this[Flights.disqualified],
@@ -467,6 +524,7 @@ object FlightQueries {
             priceMarket = latestPrice.priceMarket,
             priceCheckedAt = latestPrice.checkedAt,
             priceSource = latestPrice.source,
+            sourceUrl = latestPrice.sourceUrl,
         )
     }
 
@@ -483,6 +541,7 @@ object FlightQueries {
             priceMarket = latestPrice.priceMarket,
             priceCheckedAt = latestPrice.checkedAt,
             priceSource = latestPrice.source,
+            sourceUrl = latestPrice.sourceUrl,
         )
     }
 
@@ -501,6 +560,7 @@ object FlightQueries {
                     priceMarket = latestPrice.priceMarket,
                     priceCheckedAt = latestPrice.checkedAt,
                     priceSource = latestPrice.source,
+                    sourceUrl = latestPrice.sourceUrl,
                 )
             } else null
         }
@@ -527,6 +587,7 @@ object PriceHistoryQueries {
                     it[flightId] = dto.flightId
                     it[amount] = dto.amount
                     it[currency] = dto.currency
+                    it[sourceUrl] = dto.sourceUrl
                     it[checkedAt] = dto.checkedAt
                     it[priceSource] = dto.source
                     it[priceMarket] = dto.priceMarket
@@ -589,6 +650,7 @@ object PriceHistoryQueries {
             flightId = this[PriceHistory.flightId],
             amount = this[PriceHistory.amount],
             currency = this[PriceHistory.currency],
+            sourceUrl = this[PriceHistory.sourceUrl],
             checkedAt = this[PriceHistory.checkedAt],
             source = this[PriceHistory.priceSource],
             priceMarket = this[PriceHistory.priceMarket],

@@ -492,7 +492,8 @@ class CommandsTest {
 
         assertEquals(0, exitCode, "Expected success but got stderr: ${stderr()}")
         val output = stdout()
-        assertTrue(output.contains(id1))
+        // Only check for first 8 chars of ID (table truncates)
+        assertTrue(output.contains(id1.take(8)), "Expected output to contain ${id1.take(8)}, got: $output")
     }
 
     // ========================================================================
@@ -574,6 +575,9 @@ class CommandsTest {
         investigationSlug: String,
         shareLink: String,
         price: Double = 2500.0,
+        airline: String = "British Airways",
+        airlineCode: String = "BA",
+        departDate: String = "2026-05-01",
     ): String {
         val id = FlightValidator.generateId(shareLink)
         val now = Instant.now().toString()
@@ -583,18 +587,18 @@ class CommandsTest {
             {
                 "depart_airport": "LHR",
                 "arrive_airport": "NRT",
-                "depart_time": "2026-05-01T10:00:00Z",
-                "arrive_time": "2026-05-02T06:00:00Z",
+                "depart_time": "${departDate}T10:00:00Z",
+                "arrive_time": "${departDate}T06:00:00Z",
                 "duration_minutes": 720,
                 "stops": 0,
                 "legs": [{
                     "flight_number": "123",
-                    "airline": "British Airways",
-                    "airline_code": "BA",
+                    "airline": "$airline",
+                    "airline_code": "$airlineCode",
                     "depart_airport": "LHR",
                     "arrive_airport": "NRT",
-                    "depart_time": "2026-05-01T10:00:00Z",
-                    "arrive_time": "2026-05-02T06:00:00Z",
+                    "depart_time": "${departDate}T10:00:00Z",
+                    "arrive_time": "${departDate}T06:00:00Z",
                     "duration_minutes": 720
                 }]
             }
@@ -632,4 +636,662 @@ class CommandsTest {
 
         return id
     }
+}
+
+/**
+ * Integration tests for flight import commands.
+ * Tests both JSON import and database import functionality.
+ */
+class FlightImportTest {
+    private lateinit var outStream: ByteArrayOutputStream
+    private lateinit var errStream: ByteArrayOutputStream
+    private lateinit var originalIn: java.io.InputStream
+    private val originalOut = System.out
+    private val originalErr = System.err
+
+    @BeforeEach
+    fun setup() {
+        ClawfareDatabase.connectInMemory(createSchema = true)
+
+        outStream = ByteArrayOutputStream()
+        errStream = ByteArrayOutputStream()
+        originalIn = System.`in`
+        System.setOut(PrintStream(outStream))
+        System.setErr(PrintStream(errStream))
+    }
+
+    @AfterEach
+    fun tearDown() {
+        System.setOut(originalOut)
+        System.setErr(originalErr)
+        System.setIn(originalIn)
+        ClawfareDatabase.dropTables()
+    }
+
+    private fun stdout(): String = outStream.toString()
+    private fun stderr(): String = errStream.toString()
+
+    private fun executeWithStdin(input: String, vararg args: String): Int {
+        System.setIn(java.io.ByteArrayInputStream(input.toByteArray()))
+        val clawfareCmd = ClawfareCommand()
+        val cmd = CommandLine(clawfareCmd)
+        return cmd.execute(*args)
+    }
+
+    private fun execute(vararg args: String): Int {
+        val clawfareCmd = ClawfareCommand()
+        val cmd = CommandLine(clawfareCmd)
+        return cmd.execute(*args)
+    }
+
+    // ========================================================================
+    // JSON Import Tests (flight import)
+    // ========================================================================
+
+    @Test
+    fun `flight import schema prints expected format`() {
+        val exitCode = execute("flight", "import", "--schema")
+
+        assertEquals(0, exitCode)
+        assertTrue(stdout().contains("origin"))
+        assertTrue(stdout().contains("destination"))
+        assertTrue(stdout().contains("departDate"))
+        assertTrue(stdout().contains("price"))
+    }
+
+    @Test
+    fun `flight import updates existing flight price`() {
+        createTestInvestigation("tokyo-may-2026")
+        createTestFlight("tokyo-may-2026", "https://example.com/ba-flight", 2500.0, "British Airways", "BA", "2026-05-01")
+
+        val importJson = """[{
+            "origin": "LHR",
+            "destination": "NRT",
+            "departDate": "2026-05-01",
+            "airline": "British Airways",
+            "price": 2200.0,
+            "currency": "GBP"
+        }]"""
+
+        val exitCode = executeWithStdin(importJson, "flight", "import", "tokyo-may-2026")
+
+        assertEquals(0, exitCode, "Expected success but got stderr: ${stderr()}")
+        assertTrue(stdout().contains("1 updated"))
+
+        // Verify price history was recorded
+        val flights = FlightQueries.listByInvestigation("tokyo-may-2026")
+        assertEquals(1, flights.size)
+        
+        val history = PriceHistoryQueries.getByFlightId(flights[0].id)
+        assertEquals(2, history.size) // Initial + update
+        assertEquals(2200.0, history.last().amount)
+    }
+
+    @Test
+    fun `flight import records unchanged price as check`() {
+        createTestInvestigation("tokyo-may-2026")
+        createTestFlight("tokyo-may-2026", "https://example.com/ba-flight", 2500.0, "British Airways", "BA", "2026-05-01")
+
+        val importJson = """[{
+            "origin": "LHR",
+            "destination": "NRT",
+            "departDate": "2026-05-01",
+            "airline": "British Airways",
+            "price": 2500.0,
+            "currency": "GBP"
+        }]"""
+
+        val exitCode = executeWithStdin(importJson, "flight", "import", "tokyo-may-2026")
+
+        assertEquals(0, exitCode, "Expected success but got stderr: ${stderr()}")
+        assertTrue(stdout().contains("1 unchanged"))
+
+        // Verify a price check was still recorded
+        val flights = FlightQueries.listByInvestigation("tokyo-may-2026")
+        val history = PriceHistoryQueries.getByFlightId(flights[0].id)
+        assertEquals(2, history.size) // Initial + check
+    }
+
+    @Test
+    fun `flight import with add-new creates new flights`() {
+        createTestInvestigation("tokyo-may-2026")
+
+        val importJson = """[{
+            "origin": "LHR",
+            "destination": "NRT",
+            "departDate": "2026-05-14",
+            "returnDate": "2026-05-30",
+            "airline": "Korean Air",
+            "price": 4347,
+            "currency": "GBP",
+            "link": "https://www.kayak.co.uk/book/flight/KE907-2026-05-14/details"
+        }]"""
+
+        val exitCode = executeWithStdin(importJson, "flight", "import", "--add-new", "tokyo-may-2026")
+
+        assertEquals(0, exitCode, "Expected success but got stderr: ${stderr()}")
+        assertTrue(stdout().contains("1 added"))
+
+        // Verify flight was created
+        val flights = FlightQueries.listByInvestigation("tokyo-may-2026")
+        assertEquals(1, flights.size)
+        assertEquals(4347.0, flights[0].priceAmount)
+        assertEquals("GBP", flights[0].priceCurrency)
+        assertEquals("LHR", flights[0].origin)
+        assertEquals("NRT", flights[0].destination)
+    }
+
+    @Test
+    fun `flight import with add-new skips existing links`() {
+        createTestInvestigation("tokyo-may-2026")
+        
+        // First import
+        val importJson = """[{
+            "origin": "LHR",
+            "destination": "NRT",
+            "departDate": "2026-05-14",
+            "airline": "Korean Air",
+            "price": 4347,
+            "currency": "GBP",
+            "link": "https://www.kayak.co.uk/book/flight/test-booking-123"
+        }]"""
+        executeWithStdin(importJson, "flight", "import", "--add-new", "tokyo-may-2026")
+        
+        // Reset streams
+        outStream.reset()
+        
+        // Second import with same link - will match existing flight and report unchanged
+        val exitCode = executeWithStdin(importJson, "flight", "import", "--add-new", "tokyo-may-2026")
+
+        assertEquals(0, exitCode)
+        // Second import matches by origin/dest/date/airline, so it reports unchanged (same price)
+        assertTrue(stdout().contains("1 unchanged"), "Expected 1 unchanged in output: ${stdout()}")
+        
+        // Should still be only 1 flight
+        val flights = FlightQueries.listByInvestigation("tokyo-may-2026")
+        assertEquals(1, flights.size)
+    }
+
+    @Test
+    fun `flight import without add-new reports unmatched`() {
+        createTestInvestigation("tokyo-may-2026")
+
+        val importJson = """[{
+            "origin": "LHR",
+            "destination": "NRT",
+            "departDate": "2026-05-14",
+            "airline": "Korean Air",
+            "price": 4347,
+            "currency": "GBP"
+        }]"""
+
+        val exitCode = executeWithStdin(importJson, "flight", "import", "tokyo-may-2026")
+
+        assertEquals(0, exitCode)
+        assertTrue(stdout().contains("1 not matched"))
+        
+        // No flights should be created
+        val flights = FlightQueries.listByInvestigation("tokyo-may-2026")
+        assertEquals(0, flights.size)
+    }
+
+    @Test
+    fun `flight import dry-run shows what would happen`() {
+        createTestInvestigation("tokyo-may-2026")
+        createTestFlight("tokyo-may-2026", "https://example.com/ba-flight", 2500.0, "British Airways", "BA", "2026-05-01")
+
+        val importJson = """[{
+            "origin": "LHR",
+            "destination": "NRT",
+            "departDate": "2026-05-01",
+            "airline": "British Airways",
+            "price": 2200.0,
+            "currency": "GBP"
+        }]"""
+
+        val exitCode = executeWithStdin(importJson, "flight", "import", "--dry-run", "tokyo-may-2026")
+
+        assertEquals(0, exitCode)
+        assertTrue(stdout().contains("[DRY RUN]"))
+        
+        // Price should NOT be updated
+        val flights = FlightQueries.listByInvestigation("tokyo-may-2026")
+        val history = PriceHistoryQueries.getByFlightId(flights[0].id)
+        assertEquals(1, history.size) // Only initial, no update
+        assertEquals(2500.0, history[0].amount)
+    }
+
+    @Test
+    fun `flight import add-new dry-run shows what would be added`() {
+        createTestInvestigation("tokyo-may-2026")
+
+        val importJson = """[{
+            "origin": "LHR",
+            "destination": "NRT",
+            "departDate": "2026-05-14",
+            "airline": "Korean Air",
+            "price": 4347,
+            "currency": "GBP"
+        }]"""
+
+        val exitCode = executeWithStdin(importJson, "flight", "import", "--add-new", "--dry-run", "tokyo-may-2026")
+
+        assertEquals(0, exitCode)
+        assertTrue(stdout().contains("[DRY RUN] Would add"))
+        assertTrue(stdout().contains("Korean Air"))
+        
+        // No flights should be created
+        val flights = FlightQueries.listByInvestigation("tokyo-may-2026")
+        assertEquals(0, flights.size)
+    }
+
+    @Test
+    fun `flight import handles multiple flights`() {
+        createTestInvestigation("tokyo-may-2026")
+        createTestFlight("tokyo-may-2026", "https://example.com/ba-flight", 2500.0, "British Airways", "BA", "2026-05-01")
+
+        val importJson = """[
+            {"origin": "LHR", "destination": "NRT", "departDate": "2026-05-01", "airline": "British Airways", "price": 2200.0, "currency": "GBP"},
+            {"origin": "LHR", "destination": "NRT", "departDate": "2026-05-14", "airline": "Korean Air", "price": 4347, "currency": "GBP", "link": "https://kayak.com/book/test-123"}
+        ]"""
+
+        val exitCode = executeWithStdin(importJson, "flight", "import", "--add-new", "tokyo-may-2026")
+
+        assertEquals(0, exitCode, "Expected success but got stderr: ${stderr()}")
+        assertTrue(stdout().contains("1 updated"))
+        assertTrue(stdout().contains("1 added"))
+        
+        val flights = FlightQueries.listByInvestigation("tokyo-may-2026")
+        assertEquals(2, flights.size)
+    }
+
+    @Test
+    fun `flight import rejects empty input`() {
+        createTestInvestigation("tokyo-may-2026")
+
+        val exitCode = executeWithStdin("", "flight", "import", "tokyo-may-2026")
+
+        assertEquals(1, exitCode)
+        assertTrue(stderr().contains("No input"))
+    }
+
+    @Test
+    fun `flight import rejects invalid json`() {
+        createTestInvestigation("tokyo-may-2026")
+
+        val exitCode = executeWithStdin("not valid json", "flight", "import", "tokyo-may-2026")
+
+        assertEquals(1, exitCode)
+        assertTrue(stderr().contains("Failed to parse"))
+    }
+
+    @Test
+    fun `flight import rejects unknown investigation`() {
+        val importJson = """[{"origin": "LHR", "destination": "NRT", "departDate": "2026-05-01", "airline": "BA", "price": 1000}]"""
+
+        val exitCode = executeWithStdin(importJson, "flight", "import", "unknown-investigation")
+
+        assertEquals(1, exitCode)
+        assertTrue(stderr().contains("not found"))
+    }
+
+    // ========================================================================
+    // Helper Functions
+    // ========================================================================
+
+    private fun createTestInvestigation(slug: String): InvestigationDto {
+        val now = Instant.now().toString()
+        val dto = InvestigationDto(
+            slug = slug,
+            origin = "LHR",
+            destination = "NRT",
+            departStart = "2026-05-01",
+            departEnd = "2026-05-15",
+            returnStart = "2026-05-15",
+            returnEnd = "2026-05-30",
+            cabinClass = "economy",
+            maxStops = 1,
+            createdAt = now,
+            updatedAt = now,
+        )
+        return InvestigationQueries.create(dto)
+    }
+
+    private fun createTestFlight(
+        investigationSlug: String,
+        shareLink: String,
+        price: Double,
+        airline: String,
+        airlineCode: String,
+        departDate: String,
+    ): String {
+        val id = FlightValidator.generateId(shareLink)
+        val now = Instant.now().toString()
+
+        val outboundJson = """
+            {
+                "depart_airport": "LHR",
+                "arrive_airport": "NRT",
+                "depart_time": "${departDate}T10:00:00Z",
+                "arrive_time": "${departDate}T06:00:00Z",
+                "duration_minutes": 720,
+                "stops": 0,
+                "legs": [{
+                    "flight_number": "123",
+                    "airline": "$airline",
+                    "airline_code": "$airlineCode",
+                    "depart_airport": "LHR",
+                    "arrive_airport": "NRT",
+                    "depart_time": "${departDate}T10:00:00Z",
+                    "arrive_time": "${departDate}T06:00:00Z",
+                    "duration_minutes": 720
+                }]
+            }
+        """.trimIndent()
+
+        val dto = FlightDto(
+            id = id,
+            investigationSlug = investigationSlug,
+            shareLink = shareLink,
+            source = "google_flights",
+            tripType = "round_trip",
+            ticketStructure = "single",
+            priceAmount = price,
+            priceCurrency = "GBP",
+            priceMarket = "UK",
+            origin = "LHR",
+            destination = "NRT",
+            outboundJson = outboundJson,
+            returnJson = outboundJson,
+            capturedAt = now,
+            priceCheckedAt = now,
+        )
+        FlightQueries.create(dto)
+
+        PriceHistoryQueries.create(
+            PriceHistoryDto(
+                flightId = id,
+                amount = price,
+                currency = "GBP",
+                checkedAt = now,
+            ),
+        )
+
+        return id
+    }
+}
+
+/**
+ * Tests for price tracking and denormalization.
+ */
+class PriceTrackingTest {
+    private lateinit var outStream: ByteArrayOutputStream
+    private val originalOut = System.out
+
+    @BeforeEach
+    fun setup() {
+        ClawfareDatabase.connectInMemory(createSchema = true)
+        outStream = ByteArrayOutputStream()
+        System.setOut(PrintStream(outStream))
+    }
+
+    @AfterEach
+    fun tearDown() {
+        System.setOut(originalOut)
+        ClawfareDatabase.dropTables()
+    }
+
+    private fun execute(vararg args: String): Int = CommandLine(ClawfareCommand()).execute(*args)
+
+    @Test
+    fun `flight price updates denormalized price`() {
+        createInv("tokyo")
+        val id = createFlight("tokyo", "https://example.com/f1", 2500.0)
+
+        execute("flight", "price", id, "--amount", "2200")
+
+        assertEquals(2200.0, FlightQueries.getById(id)!!.priceAmount)
+    }
+
+    @Test
+    fun `flight price records history entry`() {
+        createInv("tokyo")
+        val id = createFlight("tokyo", "https://example.com/f1", 2500.0)
+
+        execute("flight", "price", id, "--amount", "2200")
+
+        val history = PriceHistoryQueries.getByFlightId(id)
+        assertEquals(2, history.size)
+        assertEquals(2200.0, history.last().amount)
+    }
+
+    @Test
+    fun `flight price allows currency change`() {
+        createInv("tokyo")
+        val id = createFlight("tokyo", "https://example.com/f1", 2500.0)
+
+        execute("flight", "price", id, "--amount", "3500", "--currency", "USD")
+
+        val flight = FlightQueries.getById(id)!!
+        assertEquals(3500.0, flight.priceAmount)
+        assertEquals("USD", flight.priceCurrency)
+    }
+
+    @Test
+    fun `flight price preserves market info in history`() {
+        createInv("tokyo")
+        val id = createFlight("tokyo", "https://example.com/f1", 2500.0)
+
+        execute("flight", "price", id, "--amount", "2200")
+
+        val history = PriceHistoryQueries.getByFlightId(id)
+        assertEquals("UK", history.last().priceMarket)
+    }
+
+    private fun createInv(slug: String) = InvestigationQueries.create(InvestigationDto(slug = slug, origin = "LHR", destination = "NRT", departStart = "2026-05-01", departEnd = "2026-05-15", returnStart = "2026-05-15", returnEnd = "2026-05-30", cabinClass = "business", maxStops = 1, createdAt = Instant.now().toString(), updatedAt = Instant.now().toString()))
+
+    private fun createFlight(investigationSlug: String, shareLink: String, price: Double): String {
+        val id = FlightValidator.generateId(shareLink)
+        val now = Instant.now().toString()
+        val json = """{"depart_airport":"LHR","arrive_airport":"NRT","depart_time":"2026-05-01T10:00:00Z","arrive_time":"2026-05-02T06:00:00Z","duration_minutes":720,"stops":0,"legs":[{"flight_number":"123","airline":"BA","airline_code":"BA","depart_airport":"LHR","arrive_airport":"NRT","depart_time":"2026-05-01T10:00:00Z","arrive_time":"2026-05-02T06:00:00Z","duration_minutes":720}]}"""
+        FlightQueries.create(FlightDto(id = id, investigationSlug = investigationSlug, shareLink = shareLink, source = "google_flights", tripType = "round_trip", ticketStructure = "single", priceAmount = price, priceCurrency = "GBP", priceMarket = "UK", origin = "LHR", destination = "NRT", outboundJson = json, returnJson = json, capturedAt = now, priceCheckedAt = now))
+        PriceHistoryQueries.create(PriceHistoryDto(flightId = id, amount = price, currency = "GBP", checkedAt = now))
+        return id
+    }
+}
+
+/**
+ * Tests for flight matching logic in imports.
+ */
+class FlightMatchingTest {
+    private lateinit var outStream: ByteArrayOutputStream
+    private lateinit var originalIn: java.io.InputStream
+    private val originalOut = System.out
+
+    @BeforeEach
+    fun setup() {
+        ClawfareDatabase.connectInMemory(createSchema = true)
+        outStream = ByteArrayOutputStream()
+        originalIn = System.`in`
+        System.setOut(PrintStream(outStream))
+    }
+
+    @AfterEach
+    fun tearDown() {
+        System.setOut(originalOut)
+        System.setIn(originalIn)
+        ClawfareDatabase.dropTables()
+    }
+
+    private fun stdout(): String = outStream.toString()
+
+    private fun execStdin(input: String, vararg args: String): Int {
+        System.setIn(java.io.ByteArrayInputStream(input.toByteArray()))
+        return CommandLine(ClawfareCommand()).execute(*args)
+    }
+
+    @Test
+    fun `import matches by airline name case-insensitive`() {
+        createInv("tokyo")
+        createFlight("tokyo", "https://example.com/f1", 2500.0, "British Airways", "BA", "2026-05-01")
+
+        execStdin("""[{"origin":"LHR","destination":"NRT","departDate":"2026-05-01","airline":"BRITISH AIRWAYS","price":2200.0,"currency":"GBP"}]""", "flight", "import", "tokyo")
+
+        assertTrue(stdout().contains("1 updated"))
+    }
+
+    @Test
+    fun `import matches by airline code`() {
+        createInv("tokyo")
+        createFlight("tokyo", "https://example.com/f1", 2500.0, "British Airways", "BA", "2026-05-01")
+
+        execStdin("""[{"origin":"LHR","destination":"NRT","departDate":"2026-05-01","airline":"Other","airlineCode":"BA","price":2200.0,"currency":"GBP"}]""", "flight", "import", "tokyo")
+
+        assertTrue(stdout().contains("1 updated"))
+    }
+
+    @Test
+    fun `import no match on different date`() {
+        createInv("tokyo")
+        createFlight("tokyo", "https://example.com/f1", 2500.0, "British Airways", "BA", "2026-05-01")
+
+        execStdin("""[{"origin":"LHR","destination":"NRT","departDate":"2026-05-15","airline":"British Airways","price":2200.0,"currency":"GBP"}]""", "flight", "import", "tokyo")
+
+        assertTrue(stdout().contains("1 not matched"))
+    }
+
+    @Test
+    fun `import no match on different airline`() {
+        createInv("tokyo")
+        createFlight("tokyo", "https://example.com/f1", 2500.0, "British Airways", "BA", "2026-05-01")
+
+        execStdin("""[{"origin":"LHR","destination":"NRT","departDate":"2026-05-01","airline":"Lufthansa","price":2200.0,"currency":"GBP"}]""", "flight", "import", "tokyo")
+
+        assertTrue(stdout().contains("1 not matched"))
+    }
+
+    @Test
+    fun `import no match on different origin`() {
+        createInv("tokyo")
+        createFlight("tokyo", "https://example.com/f1", 2500.0, "British Airways", "BA", "2026-05-01")
+
+        execStdin("""[{"origin":"LGW","destination":"NRT","departDate":"2026-05-01","airline":"British Airways","price":2200.0,"currency":"GBP"}]""", "flight", "import", "tokyo")
+
+        assertTrue(stdout().contains("1 not matched"))
+    }
+
+    @Test
+    fun `import add-new creates round trip with return date`() {
+        createInv("tokyo")
+
+        execStdin("""[{"origin":"LHR","destination":"NRT","departDate":"2026-05-14","returnDate":"2026-05-30","airline":"Korean Air","price":4347,"currency":"GBP"}]""", "flight", "import", "--add-new", "tokyo")
+
+        val flights = FlightQueries.listByInvestigation("tokyo")
+        assertEquals(1, flights.size)
+        assertEquals("round_trip", flights[0].tripType)
+        assertEquals(4347.0, flights[0].priceAmount)
+        assertNotNull(flights[0].returnJson)
+    }
+
+    @Test
+    fun `import add-new creates one-way without return date`() {
+        createInv("tokyo")
+
+        execStdin("""[{"origin":"LHR","destination":"NRT","departDate":"2026-05-14","airline":"Korean Air","price":2000,"currency":"GBP"}]""", "flight", "import", "--add-new", "tokyo")
+
+        val flights = FlightQueries.listByInvestigation("tokyo")
+        assertEquals(1, flights.size)
+        assertEquals("one_way", flights[0].tripType)
+        assertNull(flights[0].returnJson)
+    }
+
+    @Test
+    fun `import add-new sets source to import`() {
+        createInv("tokyo")
+
+        execStdin("""[{"origin":"LHR","destination":"NRT","departDate":"2026-05-14","airline":"Korean Air","price":2000,"currency":"GBP"}]""", "flight", "import", "--add-new", "tokyo")
+
+        val flights = FlightQueries.listByInvestigation("tokyo")
+        assertEquals("import", flights[0].source)
+    }
+
+    private fun createInv(slug: String) = InvestigationQueries.create(InvestigationDto(slug = slug, origin = "LHR", destination = "NRT", departStart = "2026-05-01", departEnd = "2026-05-15", returnStart = "2026-05-15", returnEnd = "2026-05-30", cabinClass = "business", maxStops = 1, createdAt = Instant.now().toString(), updatedAt = Instant.now().toString()))
+
+    private fun createFlight(investigationSlug: String, shareLink: String, price: Double, airline: String, airlineCode: String, departDate: String): String {
+        val id = FlightValidator.generateId(shareLink)
+        val now = Instant.now().toString()
+        val json = """{"depart_airport":"LHR","arrive_airport":"NRT","depart_time":"${departDate}T10:00:00Z","arrive_time":"${departDate}T06:00:00Z","duration_minutes":720,"stops":0,"legs":[{"flight_number":"123","airline":"$airline","airline_code":"$airlineCode","depart_airport":"LHR","arrive_airport":"NRT","depart_time":"${departDate}T10:00:00Z","arrive_time":"${departDate}T06:00:00Z","duration_minutes":720}]}"""
+        FlightQueries.create(FlightDto(id = id, investigationSlug = investigationSlug, shareLink = shareLink, source = "google_flights", tripType = "round_trip", ticketStructure = "single", priceAmount = price, priceCurrency = "GBP", priceMarket = "UK", origin = "LHR", destination = "NRT", outboundJson = json, returnJson = json, capturedAt = now, priceCheckedAt = now))
+        PriceHistoryQueries.create(PriceHistoryDto(flightId = id, amount = price, currency = "GBP", checkedAt = now))
+        return id
+    }
+}
+
+/**
+ * Tests for URL validation (search vs booking URLs).
+ */
+class UrlValidationTest {
+    private lateinit var outStream: ByteArrayOutputStream
+    private lateinit var originalIn: java.io.InputStream
+    private val originalOut = System.out
+
+    @BeforeEach
+    fun setup() {
+        ClawfareDatabase.connectInMemory(createSchema = true)
+        outStream = ByteArrayOutputStream()
+        originalIn = System.`in`
+        System.setOut(PrintStream(outStream))
+    }
+
+    @AfterEach
+    fun tearDown() {
+        System.setOut(originalOut)
+        System.setIn(originalIn)
+        ClawfareDatabase.dropTables()
+    }
+
+    private fun stdout(): String = outStream.toString()
+
+    private fun execStdin(input: String, vararg args: String): Int {
+        System.setIn(java.io.ByteArrayInputStream(input.toByteArray()))
+        return CommandLine(ClawfareCommand()).execute(*args)
+    }
+
+    @Test
+    fun `rejects kayak search page url`() {
+        createInv("tokyo")
+
+        execStdin("""[{"origin":"LHR","destination":"NRT","departDate":"2026-05-14","airline":"KE","price":2000,"currency":"GBP","link":"https://www.kayak.co.uk/flights/LHR-NRT/2026-05-14/2026-05-30?sort=price"}]""", "flight", "import", "--add-new", "tokyo")
+
+        assertTrue(stdout().contains("Rejected") || stdout().contains("search page"))
+    }
+
+    @Test
+    fun `rejects amex travel search page url`() {
+        createInv("tokyo")
+
+        execStdin("""[{"origin":"LHR","destination":"NRT","departDate":"2026-05-14","airline":"KE","price":2000,"currency":"GBP","link":"https://www.americanexpress.com/en-gb/travel/flights/"}]""", "flight", "import", "--add-new", "tokyo")
+
+        assertTrue(stdout().contains("Rejected") || stdout().contains("search page"))
+    }
+
+    @Test
+    fun `accepts booking url`() {
+        createInv("tokyo")
+
+        execStdin("""[{"origin":"LHR","destination":"NRT","departDate":"2026-05-14","airline":"KE","price":2000,"currency":"GBP","link":"https://www.google.com/travel/flights/booking?flight=KE123"}]""", "flight", "import", "--add-new", "tokyo")
+
+        assertTrue(stdout().contains("1 added"))
+    }
+
+    @Test
+    fun `accepts url without link field`() {
+        createInv("tokyo")
+
+        execStdin("""[{"origin":"LHR","destination":"NRT","departDate":"2026-05-14","airline":"Korean Air","price":2000,"currency":"GBP"}]""", "flight", "import", "--add-new", "tokyo")
+
+        assertTrue(stdout().contains("1 added"))
+    }
+
+    private fun createInv(slug: String) = InvestigationQueries.create(InvestigationDto(slug = slug, origin = "LHR", destination = "NRT", departStart = "2026-05-01", departEnd = "2026-05-15", returnStart = "2026-05-15", returnEnd = "2026-05-30", cabinClass = "business", maxStops = 1, createdAt = Instant.now().toString(), updatedAt = Instant.now().toString()))
 }

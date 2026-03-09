@@ -57,6 +57,7 @@ object ClawfareDatabase {
 
         if (createSchema) {
             createTables()
+            runMigrations()
         }
 
         initialized = true
@@ -84,6 +85,7 @@ object ClawfareDatabase {
 
         if (createSchema) {
             createTables()
+            runMigrations()
         }
 
         initialized = true
@@ -97,6 +99,71 @@ object ClawfareDatabase {
         transaction {
             SchemaUtils.create(Investigations, Flights, PriceHistory)
         }
+    }
+
+    /**
+     * Run schema migrations to add new columns safely.
+     * This handles the case where an older database is missing newer columns.
+     */
+    fun runMigrations() {
+        transaction {
+            val conn = TransactionManager.current().connection.connection as Connection
+            val stmt = conn.createStatement()
+
+            // Get existing columns for each table
+            val priceHistoryCols = getTableColumns(conn, "price_history")
+            val flightsCols = getTableColumns(conn, "flights")
+
+            // Migration: Add source_url to price_history if missing
+            if (!priceHistoryCols.contains("source_url")) {
+                stmt.executeUpdate("ALTER TABLE price_history ADD COLUMN source_url TEXT DEFAULT ''")
+                // Migrate existing share_links from flights to price_history
+                stmt.executeUpdate("""
+                    UPDATE price_history 
+                    SET source_url = (
+                        SELECT share_link FROM flights WHERE flights.id = price_history.flight_id
+                    )
+                    WHERE source_url IS NULL OR source_url = ''
+                """.trimIndent())
+            }
+
+            // Migration: Make flights.share_link nullable if needed (already nullable in new schema)
+            // SQLite doesn't support ALTER COLUMN, so we skip this - new rows just use NULL
+
+            // Migration: Add stale column to flights if missing
+            if (!flightsCols.contains("stale")) {
+                stmt.executeUpdate("ALTER TABLE flights ADD COLUMN stale INTEGER DEFAULT 0")
+            }
+
+            // Migration: Add price fields to flights if missing (for backward compat)
+            if (!flightsCols.contains("price_amount")) {
+                stmt.executeUpdate("ALTER TABLE flights ADD COLUMN price_amount DOUBLE PRECISION DEFAULT 0")
+            }
+            if (!flightsCols.contains("price_currency")) {
+                stmt.executeUpdate("ALTER TABLE flights ADD COLUMN price_currency TEXT DEFAULT 'GBP'")
+            }
+            if (!flightsCols.contains("price_market")) {
+                stmt.executeUpdate("ALTER TABLE flights ADD COLUMN price_market TEXT DEFAULT 'UK'")
+            }
+            if (!flightsCols.contains("price_checked_at")) {
+                stmt.executeUpdate("ALTER TABLE flights ADD COLUMN price_checked_at TEXT DEFAULT ''")
+            }
+
+            stmt.close()
+        }
+    }
+
+    /**
+     * Get list of column names for a table.
+     */
+    private fun getTableColumns(conn: Connection, tableName: String): Set<String> {
+        val columns = mutableSetOf<String>()
+        val rs = conn.createStatement().executeQuery("PRAGMA table_info($tableName)")
+        while (rs.next()) {
+            columns.add(rs.getString("name").lowercase())
+        }
+        rs.close()
+        return columns
     }
 
     /**

@@ -61,6 +61,7 @@ object JsonExporter {
                     priceMarket = latestPrice.priceMarket,
                     priceCheckedAt = latestPrice.checkedAt,
                     priceSource = latestPrice.source,
+                    sourceUrl = latestPrice.sourceUrl,
                 )
             } else null
         }

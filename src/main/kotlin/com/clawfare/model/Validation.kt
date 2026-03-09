@@ -480,20 +480,138 @@ object FlightValidator {
         }
 
     /**
+     * Known search URL patterns that should NOT be used as flight links.
+     * These are search results pages, not specific flight booking links.
+     */
+    private val searchUrlPatterns = listOf(
+        // Kayak search pages (no specific flight selected)
+        Regex("""kayak\.[^/]+/flights/[A-Z]{3}-[A-Z]{3}/\d{4}-\d{2}-\d{2}(/\d{4}-\d{2}-\d{2})?\?"""),
+        // Google Flights search (not /booking/ or /s/ share links)
+        Regex("""google\.com/travel/flights(?!/(booking|s/))"""),
+        // Skyscanner search pages
+        Regex("""skyscanner\.[^/]+/transport/flights/[^/]+/[^/]+/\d{6}/\d{6}/\?"""),
+        // Amex travel search
+        Regex("""americanexpress\.com/[^/]+/travel/flights/?$"""),
+        Regex("""americanexpress\.com/[^/]+/travel/flights/\?"""),
+        // Expedia search
+        Regex("""expedia\.[^/]+/Flights-Search\?"""),
+        // Momondo search
+        Regex("""momondo\.[^/]+/flights/[A-Z]{3}-[A-Z]{3}/\d{4}-\d{2}-\d{2}"""),
+    )
+
+    /**
+     * Check if a URL looks like a search page rather than a specific flight.
+     * Returns a warning message if it looks like a search URL, null otherwise.
+     */
+    fun checkSearchUrl(url: String): String? {
+        val lowerUrl = url.lowercase()
+        
+        for (pattern in searchUrlPatterns) {
+            if (pattern.containsMatchIn(url) || pattern.containsMatchIn(lowerUrl)) {
+                return "This URL looks like a search page, not a specific flight. " +
+                    "Click through to a specific flight and use the Share button or copy that URL instead."
+            }
+        }
+
+        // Additional heuristics
+        if (lowerUrl.contains("kayak.") && !lowerUrl.contains("book") && !lowerUrl.contains("details")) {
+            if (Regex("""/flights/[A-Z]{3}-[A-Z]{3}/""", RegexOption.IGNORE_CASE).containsMatchIn(url)) {
+                return "Kayak URL looks like a search page. Click on a specific flight to get the booking/details URL."
+            }
+        }
+
+        if (lowerUrl.contains("americanexpress.com") && lowerUrl.contains("/travel/flights")) {
+            if (!lowerUrl.contains("itinerary") && !lowerUrl.contains("book") && !lowerUrl.contains("details")) {
+                return "Amex Travel URL looks like the search page. Select a specific flight to get the booking URL."
+            }
+        }
+
+        return null
+    }
+
+    /**
+     * Validate a share link and return warnings/errors.
+     * Returns a pair of (isValid, warningOrError).
+     */
+    fun validateShareLink(url: String): Pair<Boolean, String?> {
+        if (url.isBlank()) {
+            return Pair(false, "share_link is required")
+        }
+        if (!isValidUrl(url)) {
+            return Pair(false, "share_link must be a valid URL")
+        }
+        val searchWarning = checkSearchUrl(url)
+        if (searchWarning != null) {
+            return Pair(false, searchWarning)
+        }
+        return Pair(true, null)
+    }
+
+    /**
      * Check if string is a valid 3-letter airport code.
      */
     private fun isValidAirportCode(code: String): Boolean = code.matches(Regex("^[A-Z]{3}$"))
 
     /**
      * Check if string is valid ISO 8601 datetime.
+     * Accepts both with and without timezone offset.
      */
     private fun isValidIso8601(datetime: String): Boolean =
         try {
-            ZonedDateTime.parse(datetime)
+            normalizeDateTime(datetime)
             true
-        } catch (_: DateTimeParseException) {
+        } catch (_: Exception) {
             false
         }
+
+    /**
+     * Normalize a datetime string to ISO 8601 with timezone.
+     * Accepts:
+     *   - 2026-05-14T10:30:00Z (UTC)
+     *   - 2026-05-14T10:30:00+01:00 (with offset)
+     *   - 2026-05-14T10:30:00 (no timezone - assumes UTC)
+     *   - 2026-05-14T10:30 (no seconds - assumes :00)
+     * Returns normalized string with timezone.
+     */
+    fun normalizeDateTime(datetime: String): String {
+        // Try parsing as ZonedDateTime first (has timezone)
+        try {
+            val zdt = ZonedDateTime.parse(datetime)
+            return zdt.toInstant().toString()
+        } catch (_: DateTimeParseException) {
+            // Continue to try other formats
+        }
+
+        // Try parsing as LocalDateTime (no timezone)
+        try {
+            val ldt = java.time.LocalDateTime.parse(datetime)
+            // Assume UTC for times without timezone
+            return ldt.atZone(java.time.ZoneOffset.UTC).toInstant().toString()
+        } catch (_: DateTimeParseException) {
+            // Continue to try other formats
+        }
+
+        // Try parsing without seconds
+        try {
+            val ldt = java.time.LocalDateTime.parse(datetime + ":00")
+            return ldt.atZone(java.time.ZoneOffset.UTC).toInstant().toString()
+        } catch (_: DateTimeParseException) {
+            // Continue
+        }
+
+        // Try with T and assume it's just missing seconds
+        if (datetime.contains("T") && !datetime.contains(":00:")) {
+            try {
+                // Format like 2026-05-14T10:30
+                val ldt = java.time.LocalDateTime.parse(datetime + ":00")
+                return ldt.atZone(java.time.ZoneOffset.UTC).toInstant().toString()
+            } catch (_: Exception) {
+                // Fall through
+            }
+        }
+
+        throw DateTimeParseException("Cannot parse datetime: $datetime", datetime, 0)
+    }
 }
 
 /**
