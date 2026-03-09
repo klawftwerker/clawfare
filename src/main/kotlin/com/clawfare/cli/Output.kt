@@ -405,7 +405,7 @@ object Output {
             return "No price history found."
         }
 
-        val headers = listOf("#", "Date", "Price", "Change", "Source URL")
+        val headers = listOf("#", "Date", "Price", "Change", "Source", "Source URL")
         var prevAmount: Double? = null
         val rows =
             history.map { entry ->
@@ -427,6 +427,7 @@ object Output {
                     entry.checkedAt.substring(0, 19).replace("T", " "),
                     formatPrice(entry.amount, entry.currency),
                     change,
+                    entry.source,
                     urlDisplay,
                 )
             }
