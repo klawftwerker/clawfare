@@ -901,6 +901,9 @@ class FlightListCommand : Callable<Int> {
     @Option(names = ["--history"], description = ["Show full price history per flight"])
     var showHistory: Boolean = false
 
+    @Option(names = ["--report"], description = ["Detailed report with dates, days, routes, connections, prices, links"])
+    var showReport: Boolean = false
+
     @Option(names = ["--all"], description = ["Show all flights including those violating constraints"])
     var showAll: Boolean = false
 
@@ -1046,6 +1049,66 @@ class FlightListCommand : Callable<Int> {
             println()
             val allHistory = flights.flatMap { PriceHistoryQueries.getByFlightId(it.id) }
             println("${flights.size} flights │ ${allHistory.size} total price observations")
+        } else if (showReport) {
+            // Detailed report
+            flights.forEachIndexed { index, f ->
+                val outbound = Output.parseSegment(f.outboundJson)
+                val returnSeg = f.flight.returnJson?.let { Output.parseSegment(it) }
+                val airline = outbound?.legs?.firstOrNull()?.airline ?: "?"
+                val airlineCode = outbound?.legs?.firstOrNull()?.airlineCode ?: "?"
+                val departDate = outbound?.departTime?.take(10) ?: "?"
+                val returnDate = returnSeg?.departTime?.take(10)
+
+                // Trip duration
+                val days = if (outbound != null && returnSeg != null) {
+                    try {
+                        val d1 = java.time.ZonedDateTime.parse(outbound.departTime)
+                        val d2 = java.time.ZonedDateTime.parse(returnSeg.departTime)
+                        java.time.Duration.between(d1, d2).toDays().toInt()
+                    } catch (_: Exception) { null }
+                } else null
+
+                // Route with stops
+                val outStops = outbound?.stops ?: 0
+                val retStops = returnSeg?.stops ?: 0
+                val outRoute = if (outStops == 0) "${f.origin}→${f.destination} (nonstop)" else {
+                    val vias = outbound?.legs?.drop(0)?.dropLast(1)?.map { it.arriveAirport } ?: emptyList()
+                    if (vias.isNotEmpty()) "${f.origin}→${vias.joinToString("→")}→${f.destination}" 
+                    else "${f.origin}→${f.destination} ($outStops stop)"
+                }
+                val retRoute = if (returnSeg == null) null else if (retStops == 0) "${f.destination}→${f.origin} (nonstop)" else {
+                    val vias = returnSeg.legs.drop(0).dropLast(1).map { it.arriveAirport }
+                    if (vias.isNotEmpty()) "${f.destination}→${vias.joinToString("→")}→${f.origin}"
+                    else "${f.destination}→${f.origin} ($retStops stop)"
+                }
+
+                // Connection times
+                val outLayovers = Output.formatLayovers(outbound)
+                val retLayovers = returnSeg?.let { Output.formatLayovers(it) }
+
+                // Links
+                val latestHistory = PriceHistoryQueries.getByFlightId(f.id).maxByOrNull { it.checkedAt }
+                val link = latestHistory?.sourceUrl?.takeIf { it.isNotBlank() } ?: f.flight.shareLink
+
+                if (index > 0) println()
+                println("${Output.formatPrice(f.priceAmount, f.priceCurrency)} — $airline ($airlineCode)")
+                if (f.flight.tripType == "round_trip" && days != null) {
+                    println("  📅 $departDate → $returnDate ($days days)")
+                } else if (f.flight.tripType == "one_way") {
+                    println("  📅 $departDate (one-way)")
+                } else {
+                    println("  📅 $departDate")
+                }
+                println("  ✈️  Out: $outRoute")
+                if (outLayovers.isNotBlank()) println("  ⏱  Out connections: $outLayovers")
+                if (retRoute != null) {
+                    println("  ✈️  Ret: $retRoute")
+                    if (retLayovers != null && retLayovers.isNotBlank()) println("  ⏱  Ret connections: $retLayovers")
+                }
+                println("  🔗 $link")
+            }
+            println()
+            println("${flights.size} flights")
         } else {
             println(Output.formatFlightWithPriceTable(flights))
         }

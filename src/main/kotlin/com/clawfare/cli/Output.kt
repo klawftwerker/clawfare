@@ -302,6 +302,28 @@ object Output {
     fun formatLayover(minutes: Int): String = if (minutes == 0) "—" else formatDuration(minutes)
 
     /**
+     * Format layovers for a single segment with airport codes.
+     * Returns e.g. "2h 10m at CDG, 1h 30m at NRT" or "" if nonstop.
+     */
+    fun formatLayovers(segment: FlightSegment?): String {
+        if (segment == null) return ""
+        val legs = segment.legs
+        if (legs.size <= 1) return ""
+        val parts = mutableListOf<String>()
+        for (i in 0 until legs.size - 1) {
+            try {
+                val arrive = java.time.ZonedDateTime.parse(legs[i].arriveTime)
+                val depart = java.time.ZonedDateTime.parse(legs[i + 1].departTime)
+                val minutes = java.time.Duration.between(arrive, depart).toMinutes().toInt()
+                parts.add("${formatDuration(minutes)} at ${legs[i].arriveAirport}")
+            } catch (_: Exception) {
+                parts.add("? at ${legs[i].arriveAirport}")
+            }
+        }
+        return parts.joinToString(", ")
+    }
+
+    /**
      * Calculate total layover time in minutes from a segment.
      */
     fun calcLayoverMinutes(segment: FlightSegment): Int {
