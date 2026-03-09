@@ -585,7 +585,6 @@ class InvUrlsCommand : Callable<Int> {
         FlightTagCommand::class,
         FlightUntagCommand::class,
         FlightPriceCommand::class,
-        FlightPriceDeleteCommand::class,
         FlightMarkStaleCommand::class,
         FlightStaleCommand::class,
         FlightHistoryCommand::class,
@@ -1430,76 +1429,6 @@ class FlightPriceCommand : Callable<Int> {
         if (flightWithPrice.flight.stale) {
             println("  ✓ Cleared stale flag")
         }
-        return 0
-    }
-}
-
-/**
- * Delete a specific price history entry by its ID.
- * Use `flight show <id> --history` to find the price entry # to delete.
- */
-@Command(
-    name = "price-delete",
-    description = ["Delete a specific price history entry"],
-)
-class FlightPriceDeleteCommand : Callable<Int> {
-    @ParentCommand
-    lateinit var parent: FlightCommand
-
-    @Parameters(index = "0", description = ["Price history entry ID (the # column from --history)"])
-    var priceId: Int = 0
-
-    @Option(names = ["--force", "-f"], description = ["Skip confirmation"])
-    var force: Boolean = false
-
-    override fun call(): Int {
-        parent.parent.ensureDb()
-
-        val entry = PriceHistoryQueries.getById(priceId)
-        if (entry == null) {
-            Output.error("Price history entry #$priceId not found")
-            return 1
-        }
-
-        val flight = FlightQueries.getById(entry.flightId)
-        val flightLabel = flight?.let { "${it.id.take(8)} (${it.origin}→${it.destination})" } ?: entry.flightId.take(8)
-
-        println("Price entry #${entry.id}:")
-        println("  Flight: $flightLabel")
-        println("  Amount: ${Output.formatPrice(entry.amount, entry.currency)}")
-        println("  Date:   ${entry.checkedAt.take(19).replace("T", " ")}")
-        println("  Source: ${entry.sourceUrl.ifBlank { "—" }}")
-
-        if (!force) {
-            Output.warn("Use --force to confirm deletion of this price entry.")
-            return 1
-        }
-
-        val deleted = PriceHistoryQueries.deleteById(priceId)
-        if (!deleted) {
-            Output.error("Failed to delete price entry #$priceId")
-            return 1
-        }
-
-        // If this was the latest price, update the flight's denormalized price to the new latest
-        val remaining = PriceHistoryQueries.getByFlightId(entry.flightId)
-        if (remaining.isNotEmpty() && flight != null) {
-            val latest = remaining.maxByOrNull { it.checkedAt }!!
-            FlightQueries.update(
-                flight.copy(
-                    priceAmount = latest.amount,
-                    priceCurrency = latest.currency,
-                    priceCheckedAt = latest.checkedAt,
-                    stale = true, // mark stale since we just removed data
-                )
-            )
-            println("  ✓ Updated flight price to ${Output.formatPrice(latest.amount, latest.currency)} (previous entry)")
-        } else if (flight != null) {
-            // No price history left — mark stale
-            FlightQueries.update(flight.copy(stale = true))
-        }
-
-        Output.success("Deleted price entry #$priceId")
         return 0
     }
 }
