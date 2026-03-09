@@ -1111,8 +1111,13 @@ class FlightListCommand : Callable<Int> {
                     ?: f.flight.shareLink.orEmpty()
                 val link = bestLink
 
+                // Source of the latest price
+                val latestEntry = allHistory.maxByOrNull { it.checkedAt }
+                val priceSource = latestEntry?.source?.takeIf { it.isNotBlank() && it != "manual" }
+
                 if (index > 0) println()
-                println("${Output.formatPrice(f.priceAmount, f.priceCurrency)} — $airline ($airlineCode)")
+                val sourceLabel = if (priceSource != null) " via $priceSource" else ""
+                println("${Output.formatPrice(f.priceAmount, f.priceCurrency)}$sourceLabel — $airline ($airlineCode)")
                 if (f.flight.tripType == "round_trip" && days != null) {
                     println("  📅 $departDate → $returnDate ($days days)")
                 } else if (f.flight.tripType == "one_way") {
@@ -1471,6 +1476,9 @@ class FlightPriceCommand : Callable<Int> {
     @Option(names = ["--market", "-m"], description = ["Price market (e.g., UK, US)"])
     var market: String? = null
 
+    @Option(names = ["--source", "-s"], description = ["Booking source (e.g., airline_direct, checknfly, expedia, google_flights)"])
+    var source: String? = null
+
     @Option(names = ["--force", "-f"], description = ["Bypass sanity warnings (not hard errors)"])
     var force: Boolean = false
 
@@ -1569,6 +1577,7 @@ class FlightPriceCommand : Callable<Int> {
         val now = Instant.now().toString()
 
         // Record in price history (canonical location)
+        val priceSource = source ?: "manual"
         PriceHistoryQueries.create(
             PriceHistoryDto(
                 flightId = flightWithPrice.flight.id,
@@ -1577,6 +1586,7 @@ class FlightPriceCommand : Callable<Int> {
                 sourceUrl = sourceUrl,
                 checkedAt = now,
                 priceMarket = newMarket,
+                source = priceSource,
             ),
         )
 
